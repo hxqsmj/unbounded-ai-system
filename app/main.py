@@ -1,8 +1,9 @@
 """
-无界AI超级员工系统 - FastAPI 应用入口 (V3.0)
+无界AI超级员工系统 - FastAPI 应用入口 (V4.0 生产级)
 
 启动方式:
-  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  开发: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+  生产: uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 4
 
 生命周期:
   startup:  初始化 AIBrain + HumanLoop + TypingSimulator + Redis Worker
@@ -11,11 +12,14 @@
 
 import asyncio
 import json
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.services.ai_brain import (
@@ -181,12 +185,58 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 中间件
+# ── 简易速率限制中间件 (生产级，无需额外依赖) ──────────────
+# 全局: 每 IP 每分钟最多 120 请求
+# API 写入端点: 每 IP 每分钟最多 30 请求
+
+_rate_window = 60  # 窗口秒数
+_rate_global_max = 120  # 全局最大
+_rate_write_max = 30    # 写入端点最大
+
+_rate_store: dict[str, list[float]] = defaultdict(list)
+_rate_store_lock = asyncio.Lock()
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """简易滑动窗口速率限制"""
+    # 获取客户端 IP
+    client_ip = request.client.host if request.client else "unknown"
+
+    # 写入端点更严格
+    is_write = request.method in ("POST", "PUT", "PATCH", "DELETE")
+    max_req = _rate_write_max if is_write else _rate_global_max
+
+    now = time.time()
+    cutoff = now - _rate_window
+
+    async with _rate_store_lock:
+        # 清理过期记录
+        _rate_store[client_ip] = [t for t in _rate_store[client_ip] if t > cutoff]
+
+        if len(_rate_store[client_ip]) >= max_req:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "请求过于频繁，请稍后再试", "retry_after": _rate_window},
+            )
+
+        _rate_store[client_ip].append(now)
+
+    response = await call_next(request)
+    return response
+
+
+# CORS 中间件 (生产环境: 允许 localhost + 服务器自身)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境需收紧
+    allow_origins=[
+        "http://localhost:5173",   # 本地开发
+        "http://localhost:8001",   # 本地后端
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1",       # Nginx 前端
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

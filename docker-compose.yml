@@ -20,7 +20,26 @@ services:
       - ./data/mongo_data:/data/db
     restart: always
 
-  # 3. 拟人化延迟队列 Redis
+  # 3. RAG 反馈数据飞轮 PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: unbounded_postgres
+    environment:
+      POSTGRES_USER: geop
+      POSTGRES_PASSWORD: geop_password
+      POSTGRES_DB: unbounded_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/pg_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geop -d unbounded_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 4. 拟人化延迟队列 Redis
   redis:
     image: redis:7.0-alpine
     container_name: unbounded_redis
