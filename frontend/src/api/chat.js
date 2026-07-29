@@ -1,0 +1,71 @@
+/**
+ * 无界AI — 人机协作 API 层
+ *
+ * 后端地址通过 Vite proxy 代理，开发时所有 /api 请求自动转发到 localhost:8001。
+ */
+
+import axios from 'axios'
+
+const http = axios.create({
+  baseURL: '/api/v1/chat',
+  timeout: 30000,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// ═══════════════════════════════════════════════
+// 待审核队列
+// ═══════════════════════════════════════════════
+
+/**
+ * 获取待审核消息列表
+ * @param {Object} params - { limit?: number, offset?: number }
+ * @returns {{ total: number, items: Array }}
+ */
+export async function fetchPendingQueue(params = {}) {
+  const { data } = await http.get('/pending', { params })
+  return data
+}
+
+// ═══════════════════════════════════════════════
+// 审核详情
+// ═══════════════════════════════════════════════
+
+/**
+ * 获取单条 trace 的完整审核详情 (含 RAG 上下文)
+ * @param {string} traceId
+ * @returns {Object} trace detail
+ */
+export async function fetchTraceDetail(traceId) {
+  const { data } = await http.get(`/trace/${traceId}`)
+  return data
+}
+
+// ═══════════════════════════════════════════════
+// AI 生成 (用于手动触发)
+// ═══════════════════════════════════════════════
+
+/**
+ * 调用 AI 生成回复
+ * @param {Object} params - { account_id, customer_id, user_message, history? }
+ * @returns {Object} { trace_id, generated_text, is_fallback, max_score, status }
+ */
+export async function generateReply(params) {
+  const { data } = await http.post('/generate', params)
+  return data
+}
+
+// ═══════════════════════════════════════════════
+// 人工确认/修改/拒绝
+// ═══════════════════════════════════════════════
+
+/**
+ * 提交人工审核结果
+ * @param {Object} params - { trace_id, final_text, is_modified, action }
+ * @returns {Object} { trace_id, status, message }
+ */
+export async function confirmSend(params) {
+  const { data } = await http.post('/confirm_send', params)
+  return data
+}
+
+export default http

@@ -1,0 +1,31 @@
+services:
+  # 1. 向量数据库 Qdrant
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: unbounded_qdrant
+    ports:
+      - "6333:6333" # HTTP API
+      - "6334:6334" # gRPC API
+    volumes:
+      - ./data/qdrant_storage:/qdrant/storage
+    restart: always
+
+  # 2. 全链路 Trace 日志数据库 MongoDB
+  mongodb:
+    image: mongo:6.0
+    container_name: unbounded_mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/mongo_data:/data/db
+    restart: always
+
+  # 3. 拟人化延迟队列 Redis
+  redis:
+    image: redis:7.0-alpine
+    container_name: unbounded_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis_data:/data
+    restart: always

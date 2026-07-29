@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════
+# 无界AI超级员工系统 — Ngrok 内网穿透配置
+# ═══════════════════════════════════════════════════════════
+#
+# 用法:
+#   ngrok start --all --config=config/ngrok.yml
+#
+# 获取公网地址后:
+#   https://dashboard.ngrok.com/endpoints 查看 TCP 地址
+#   例如: 0.tcp.ngrok.io:12345
+#
+# 免费方案: ngrok 自带 (https://ngrok.com)
+# 自建方案: frp (https://github.com/fatedier/frp)
+# ═══════════════════════════════════════════════════════════
+
+version: "2"
+
+# ── WSS Gateway TCP 隧道 ─────────────────────────────────
+# 微信 Hook 客户端通过此地址连接网关
+tunnels:
+  wss-gateway:
+    proto: tcp
+    addr: 8765
+    # ngrok 会自动分配公网地址，如 0.tcp.ngrok.io:XXXXX
+
+# ── 可选: API 隧道 (如需远程访问后端 Swagger) ────────────
+  api-server:
+    proto: tcp
+    addr: 8001
+
+# ── 可选: 前端隧道 (如需远程访问审核面板) ─────────────────
+  web-frontend:
+    proto: tcp
+    addr: 5173
+
+# ═══════════════════════════════════════════════════════════
+# 自建 frp 替代方案 (更稳定、无流量限制)
+# ═══════════════════════════════════════════════════════════
+#
+# 服务端 frps.ini:
+#   [common]
+#   bind_port = 7000
+#
+# 客户端 frpc.ini:
+#   [common]
+#   server_addr = your-server-ip
+#   server_port = 7000
+#
+#   [wss_gateway]
+#   type = tcp
+#   local_ip = 127.0.0.1
+#   local_port = 8765
+#   remote_port = 8765
