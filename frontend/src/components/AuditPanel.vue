@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, computed, nextTick } from 'vue'
-import { fetchTraceDetail, confirmSend } from '../api/chat.js'
+import { fetchTraceDetail, confirmSend, recordOperation } from '../api/chat.js'
 import { playSuccess, playReject } from '../composables/useAudio.js'
 
 // ── Props & Emits ──────────────────────────
@@ -18,8 +18,9 @@ const submitResult = ref(null)
 const showRagContext = ref(false)
 const editorRef = ref(null)
 
-// ── 快捷话术 ───────────────────────────────
-const quickPhrases = [
+// ── 快捷话术 (localStorage 持久化) ────────
+const STORAGE_KEY = 'wujie_quick_phrases'
+const defaultPhrases = [
   { label: '💬 加上礼貌用语', append: '，感谢您的咨询，如有其他问题随时联系我！' },
   { label: '💰 补充价格说明', append: '\n\n温馨提示：以上价格为当前促销价，具体以结算页面为准。' },
   { label: '📞 预约电话回访', append: '\n\n如需进一步了解，我可以安排专人在工作时间给您回电。请确认您的联系方式。' },
@@ -27,11 +28,41 @@ const quickPhrases = [
   { label: '🛡️ 补充售后说明', append: '，我们提供7天无理由退货和30天换货服务。' },
 ]
 
+const quickPhrases = ref(loadPhrases())
+const showPhraseEditor = ref(false)
+const newPhrase = ref({ label: '', append: '' })
+
+function loadPhrases() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    return saved ? JSON.parse(saved) : [...defaultPhrases]
+  } catch { return [...defaultPhrases] }
+}
+
+function savePhrases() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(quickPhrases.value))
+}
+
+function addPhrase() {
+  if (!newPhrase.value.label.trim() || !newPhrase.value.append.trim()) return
+  quickPhrases.value.push({ ...newPhrase.value })
+  newPhrase.value = { label: '', append: '' }
+  savePhrases()
+}
+
+function removePhrase(idx) {
+  quickPhrases.value.splice(idx, 1)
+  savePhrases()
+}
+
+function resetPhrases() {
+  quickPhrases.value = [...defaultPhrases]
+  savePhrases()
+}
+
 function appendPhrase(text) {
   editedText.value = (editedText.value || '') + text
-  nextTick(() => {
-    editorRef.value?.focus?.()
-  })
+  nextTick(() => { editorRef.value?.focus?.() })
 }
 
 // ── 加载详情 ────────────────────────────────
@@ -77,6 +108,13 @@ async function doAction(action) {
     })
     if (action === 'REJECT') playReject()
     else playSuccess()
+
+    // 记录操作日志
+    recordOperation({
+      trace_id: detail.value.trace_id,
+      action, operator: 'admin',
+      detail: detail.value.user_input?.substring(0, 50) || '',
+    }).catch(() => {})
 
     submitResult.value = { success: true, message: actionLabel(action) + ' — ' + result.message }
     setTimeout(() => emit('done'), 600)
@@ -219,16 +257,35 @@ function scoreBg(s) {
         <!-- 3. 智能编辑框 -->
         <div class="space-y-2">
           <!-- 快捷话术 Tag -->
-          <div class="flex flex-wrap gap-1.5">
+          <div class="flex flex-wrap gap-1.5 items-center">
             <button
-              v-for="phrase in quickPhrases"
-              :key="phrase.label"
+              v-for="(phrase, idx) in quickPhrases"
+              :key="idx"
               @click="appendPhrase(phrase.append)"
-              class="text-[11px] px-2.5 py-1 rounded-full border transition-all hover:opacity-80 active:scale-95"
+              class="text-[11px] px-2.5 py-1 rounded-full border transition-all hover:opacity-80 active:scale-95 group relative"
               style="background: var(--bg-surface); border-color: var(--border); color: var(--text-secondary);"
             >
               {{ phrase.label }}
+              <span @click.stop="removePhrase(idx)" class="ml-1 opacity-0 group-hover:opacity-100 text-red-400 cursor-pointer">×</span>
             </button>
+            <button
+              @click="showPhraseEditor = !showPhraseEditor"
+              class="text-[11px] px-2 py-1 rounded-full border-dashed border transition-all hover:opacity-80"
+              style="background: transparent; border-color: var(--accent); color: var(--accent);"
+            >+ 管理</button>
+          </div>
+
+          <!-- 话术编辑器 -->
+          <div v-if="showPhraseEditor" class="p-3 rounded-lg border space-y-2" style="background: var(--bg-surface); border-color: var(--border);">
+            <div class="flex gap-2">
+              <input v-model="newPhrase.label" placeholder="标签 (如: 📞 预约勘测)" class="flex-1 text-[12px] px-2 py-1 rounded border" style="background: var(--bg-app); border-color: var(--border); color: var(--text-primary);" @keyup.enter="addPhrase" />
+              <input v-model="newPhrase.append" placeholder="追加文本" class="flex-[2] text-[12px] px-2 py-1 rounded border" style="background: var(--bg-app); border-color: var(--border); color: var(--text-primary);" @keyup.enter="addPhrase" />
+              <button @click="addPhrase" class="text-[11px] px-3 py-1 rounded text-white" style="background: var(--accent);">添加</button>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-[10px]" style="color: var(--text-tertiary);">hover 话术标签可删除 × | 自动保存到浏览器</span>
+              <button @click="resetPhrases" class="text-[10px]" style="color: var(--text-tertiary);">恢复默认</button>
+            </div>
           </div>
 
           <!-- 编辑框 -->

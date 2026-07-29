@@ -5,7 +5,7 @@ import AuditPanel from './components/AuditPanel.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useKeyboard } from './composables/useKeyboard'
 import { playDing } from './composables/useAudio'
-import { fetchPendingQueue } from './api/chat.js'
+import { fetchPendingQueue, fetchDashboard, fetchOperationLogs } from './api/chat.js'
 
 // ── 暗黑模式 ────────────────────────────────
 const isDark = ref(localStorage.getItem('theme') === 'dark')
@@ -47,6 +47,9 @@ const accountList = computed(() => {
 })
 
 const totalPending = computed(() => queue.value.length)
+
+// ── 标签页
+const activeTab = ref('review') // 'review' | 'dashboard' | 'logs'
 
 // 搜索与筛选
 const searchQuery = ref('')
@@ -155,6 +158,27 @@ useKeyboard({
 provide('refreshTrigger', refreshTrigger)
 provide('isDark', isDark)
 
+// ── 看板 & 日志 ────────────────────────────
+const dashboard = ref(null)
+const opsLogs = ref([])
+const dashLoading = ref(false)
+
+async function loadDashboard() {
+  dashLoading.value = true
+  try { dashboard.value = await fetchDashboard() } catch (e) { console.error(e) }
+  finally { dashLoading.value = false }
+}
+
+async function loadLogs() {
+  try { const d = await fetchOperationLogs(50); opsLogs.value = d.items } catch (e) { console.error(e) }
+}
+
+// tab 切换自动加载
+watch(activeTab, (tab) => {
+  if (tab === 'dashboard') loadDashboard()
+  if (tab === 'logs') loadLogs()
+})
+
 // ── 初始化 ──────────────────────────────────
 let pollTimer = null
 onMounted(() => {
@@ -186,11 +210,19 @@ import { Search, Moon, Sunny } from '@element-plus/icons-vue'
           <h1 class="text-sm font-semibold tracking-tight" style="color: var(--text-primary);">
             无界AI 审核工作台
           </h1>
-          <div class="flex items-center gap-1.5 mt-0.5">
+          <div class="flex items-center gap-3 mt-0.5">
             <span class="pulse-connected"></span>
             <span class="text-[11px]" style="color: var(--text-tertiary);">
               {{ isConnected ? '实时连接' : '离线重连中...' }}
             </span>
+            <div class="flex gap-0.5 ml-2" style="background: var(--bg-app); border-radius: 6px; padding: 2px;">
+              <button @click="activeTab = 'review'" class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                :style="activeTab === 'review' ? { background: 'var(--bg-surface)', color: 'var(--accent)', fontWeight: 600 } : { color: 'var(--text-tertiary)' }">审核</button>
+              <button @click="activeTab = 'dashboard'" class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                :style="activeTab === 'dashboard' ? { background: 'var(--bg-surface)', color: 'var(--accent)', fontWeight: 600 } : { color: 'var(--text-tertiary)' }">看板</button>
+              <button @click="activeTab = 'logs'" class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                :style="activeTab === 'logs' ? { background: 'var(--bg-surface)', color: 'var(--accent)', fontWeight: 600 } : { color: 'var(--text-tertiary)' }">日志</button>
+            </div>
           </div>
         </div>
       </div>
@@ -244,9 +276,9 @@ import { Search, Moon, Sunny } from '@element-plus/icons-vue'
       </div>
     </header>
 
-    <!-- ═══════════════ 主内容区 (左右分栏) ═══════════════ -->
-    <div class="flex flex-1 overflow-hidden">
-      <!-- 左侧队列 (35%) -->
+    <!-- ═══════════════ 主内容区 ═══════════════ -->
+    <!-- 审核视图 -->
+    <div v-if="activeTab === 'review'" class="flex flex-1 overflow-hidden">
       <aside class="w-[35%] min-w-[360px] border-r flex flex-col"
         style="background: var(--bg-surface); border-color: var(--border);">
         <QueuePanel
@@ -257,15 +289,85 @@ import { Search, Moon, Sunny } from '@element-plus/icons-vue'
           @refresh="loadQueue"
         />
       </aside>
-
-      <!-- 右侧审核区 (65%) -->
       <main class="flex-1 flex flex-col" style="background: var(--bg-app);">
-        <AuditPanel
-          ref="auditRef"
-          :trace="selectedTrace"
-          @done="onDone"
-        />
+        <AuditPanel ref="auditRef" :trace="selectedTrace" @done="onDone" />
       </main>
+    </div>
+
+    <!-- 数据看板 -->
+    <div v-if="activeTab === 'dashboard'" class="flex-1 overflow-y-auto p-6" style="background: var(--bg-app);">
+      <div class="max-w-4xl mx-auto space-y-5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold" style="color: var(--text-primary);">📊 数据看板</h2>
+          <button @click="loadDashboard" class="text-xs px-3 py-1 rounded" style="background: var(--accent); color: white;">刷新</button>
+        </div>
+
+        <!-- 核心指标 -->
+        <div class="grid grid-cols-4 gap-4">
+          <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+            <div class="text-[11px] uppercase tracking-wide" style="color: var(--text-tertiary);">待审核</div>
+            <div class="text-2xl font-bold mt-1" style="color: var(--accent);">{{ dashboard?.pending_count || 0 }}</div>
+          </div>
+          <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+            <div class="text-[11px] uppercase tracking-wide" style="color: var(--text-tertiary);">今日处理</div>
+            <div class="text-2xl font-bold mt-1" style="color: var(--green);">{{ dashboard?.processed_today || 0 }}</div>
+          </div>
+          <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+            <div class="text-[11px] uppercase tracking-wide" style="color: var(--text-tertiary);">AI 采纳率</div>
+            <div class="text-2xl font-bold mt-1" style="color: var(--accent);">{{ dashboard?.acceptance_rate || 0 }}%</div>
+          </div>
+          <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+            <div class="text-[11px] uppercase tracking-wide" style="color: var(--text-tertiary);">今日操作</div>
+            <div class="text-2xl font-bold mt-1" style="color: var(--amber);">{{ dashboard?.today_operations || 0 }}</div>
+          </div>
+        </div>
+
+        <!-- 账号分布 -->
+        <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+          <h3 class="text-sm font-medium mb-3" style="color: var(--text-primary);">各账号处理量 (今日)</h3>
+          <div class="space-y-2">
+            <div v-for="(count, acc) in dashboard?.by_account || {}" :key="acc" class="flex items-center gap-3">
+              <span class="text-xs w-20" style="color: var(--text-secondary);">{{ acc }}</span>
+              <div class="flex-1 h-5 rounded" style="background: var(--bg-app);">
+                <div class="h-full rounded transition-all" :style="{ width: Math.min(count/(dashboard?.processed_today||1)*100, 100) + '%', background: 'var(--accent)' }"></div>
+              </div>
+              <span class="text-xs font-mono" style="color: var(--text-secondary);">{{ count }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 7天趋势 -->
+        <div class="p-4 rounded-lg" style="background: var(--bg-surface); border: 1px solid var(--border);">
+          <h3 class="text-sm font-medium mb-3" style="color: var(--text-primary);">7天趋势</h3>
+          <div class="flex items-end gap-1" style="height: 100px;">
+            <div v-for="d in dashboard?.weekly_trend || []" :key="d.date" class="flex-1 flex flex-col items-center gap-1">
+              <span class="text-[10px] font-mono" style="color: var(--text-secondary);">{{ d.total }}</span>
+              <div class="w-full rounded-t" style="background: var(--accent); opacity: 0.7;"
+                :style="{ height: Math.max(d.total / Math.max(...((dashboard?.weekly_trend||[]).map(x=>x.total)||[1])) * 80, 4) + 'px' }"></div>
+              <span class="text-[9px]" style="color: var(--text-tertiary);">{{ d.date.slice(5) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 操作日志 -->
+    <div v-if="activeTab === 'logs'" class="flex-1 overflow-y-auto p-6" style="background: var(--bg-app);">
+      <div class="max-w-3xl mx-auto space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold" style="color: var(--text-primary);">📋 操作日志</h2>
+          <button @click="loadLogs" class="text-xs px-3 py-1 rounded" style="background: var(--accent); color: white;">刷新</button>
+        </div>
+        <div v-if="!opsLogs.length" class="text-center py-8" style="color: var(--text-tertiary);">暂无操作记录</div>
+        <div v-for="log in opsLogs" :key="log.timestamp" class="flex items-center gap-3 px-4 py-2.5 rounded-lg"
+          style="background: var(--bg-surface); border: 1px solid var(--border);">
+          <span class="text-[10px] px-1.5 py-0.5 rounded font-mono"
+            :style="{ background: {'ACCEPT':'var(--green-bg)','MODIFY':'var(--amber-bg)','REJECT':'var(--red-bg)'}[log.action] || 'var(--bg-hover)', color: {'ACCEPT':'var(--green)','MODIFY':'var(--amber)','REJECT':'var(--red)'}[log.action] }">{{ log.action }}</span>
+          <span class="text-xs flex-1 truncate" style="color: var(--text-primary);">{{ log.detail }}</span>
+          <span class="text-[10px] flex-shrink-0" style="color: var(--text-tertiary);">{{ log.timestamp?.slice(11,19) }}</span>
+          <span class="text-[10px] font-mono flex-shrink-0" style="color: var(--text-tertiary);">{{ log.trace_id?.slice(0,10) }}</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>

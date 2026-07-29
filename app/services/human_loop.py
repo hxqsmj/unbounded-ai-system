@@ -498,6 +498,117 @@ async def get_stats():
     return await loop.get_stats()
 
 
+# ── 操作日志 ────────────────────────────────────────────
+
+@human_loop_router.post("/operation_log")
+async def add_operation_log(request: dict):
+    """记录操作员操作: { trace_id, action, operator, detail }"""
+    loop = get_loop()
+    await loop._ensure_mongo()
+    coll = loop.mongo[settings.mongo_db]["operation_logs"]
+    doc = {
+        "trace_id": request.get("trace_id", ""),
+        "action": request.get("action", ""),
+        "operator": request.get("operator", "unknown"),
+        "detail": request.get("detail", ""),
+        "timestamp": datetime.utcnow(),
+    }
+    await coll.insert_one(doc)
+    return {"status": "ok"}
+
+
+@human_loop_router.get("/operation_log")
+async def get_operation_logs(limit: int = 50):
+    """获取最近操作日志"""
+    loop = get_loop()
+    await loop._ensure_mongo()
+    coll = loop.mongo[settings.mongo_db]["operation_logs"]
+    cursor = coll.find().sort("timestamp", -1).limit(limit)
+    results = []
+    async for doc in cursor:
+        results.append({
+            "trace_id": doc.get("trace_id"),
+            "action": doc.get("action"),
+            "operator": doc.get("operator"),
+            "detail": doc.get("detail"),
+            "timestamp": doc["timestamp"].isoformat() if doc.get("timestamp") else None,
+        })
+    return {"total": len(results), "items": results}
+
+
+@human_loop_router.get("/dashboard")
+async def get_dashboard():
+    """获取数据看板完整统计"""
+    loop = get_loop()
+    await loop._ensure_mongo()
+    trace_coll = loop._trace_collection
+    log_coll = loop.mongo[settings.mongo_db]["operation_logs"]
+
+    from datetime import timedelta
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = today - timedelta(days=7)
+
+    # 基础统计
+    pending = await trace_coll.count_documents({"status": "PENDING"})
+    processed_today = await trace_coll.count_documents({
+        "status": {"$in": ["SENT", "CANCELLED"]}, "timestamp": {"$gte": today},
+    })
+    accepted_today = await trace_coll.count_documents({
+        "status": "SENT", "human_intervention": False, "timestamp": {"$gte": today},
+    })
+    total_closed = await trace_coll.count_documents({
+        "status": {"$in": ["SENT", "CANCELLED"]}, "timestamp": {"$gte": today},
+    })
+    rate = round(accepted_today / total_closed * 100, 1) if total_closed > 0 else 0.0
+
+    # 按账号统计
+    pipeline = [
+        {"$match": {"status": {"$in": ["SENT", "CANCELLED"]}, "timestamp": {"$gte": today}}},
+        {"$group": {"_id": "$account_id", "count": {"$sum": 1}}},
+    ]
+    by_account = {}
+    async for r in trace_coll.aggregate(pipeline):
+        by_account[r["_id"]] = r["count"]
+
+    # 按小时趋势 (今日)
+    hour_pipeline = [
+        {"$match": {"timestamp": {"$gte": today}}},
+        {"$group": {"_id": {"$hour": "$timestamp"}, "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    hourly = {}
+    async for r in trace_coll.aggregate(hour_pipeline):
+        hourly[str(r["_id"])] = r["count"]
+
+    # 上周趋势
+    week_pipeline = [
+        {"$match": {"timestamp": {"$gte": week_ago}}},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
+            "total": {"$sum": 1},
+            "fallback": {"$sum": {"$cond": [{"$eq": ["$llm_raw_output", None]}, 1, 0]}},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    weekly = []
+    async for r in trace_coll.aggregate(week_pipeline):
+        weekly.append({"date": r["_id"], "total": r["total"], "fallback": r["fallback"]})
+
+    # 操作日志统计
+    log_count = await log_coll.count_documents({"timestamp": {"$gte": today}})
+
+    return {
+        "pending_count": pending,
+        "processed_today": processed_today,
+        "acceptance_rate": rate,
+        "by_account": by_account,
+        "hourly_trend": hourly,
+        "weekly_trend": weekly,
+        "today_operations": log_count,
+    }
+
+
 # ════════════════════════════════════════════════════════════
 # Mock 测试块 (if __name__ == '__main__')
 # ════════════════════════════════════════════════════════════

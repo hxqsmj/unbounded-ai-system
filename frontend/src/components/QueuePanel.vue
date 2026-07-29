@@ -57,6 +57,24 @@ function scoreBadge(score) {
 }
 
 function isSelected(idx) { return idx === props.selectedIndex }
+
+function exportCSV() {
+  const rows = props.queue
+  if (!rows.length) return
+  const headers = ['trace_id', 'account_id', 'customer_id', 'user_input', 'generated_text', 'max_score', 'is_fallback', 'status']
+  const csv = [headers.join(',')]
+  for (const r of rows) {
+    csv.push(headers.map(h => {
+      const v = r[h] ?? ''
+      return '"' + String(v).replace(/"/g, '""').substring(0, 200) + '"'
+    }).join(','))
+  }
+  const blob = new Blob(['﻿' + csv.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = `wujie_export_${new Date().toISOString().slice(0,10)}.csv`
+  a.click(); URL.revokeObjectURL(url)
+}
 </script>
 
 <template>
@@ -73,14 +91,20 @@ function isSelected(idx) { return idx === props.selectedIndex }
           {{ queue.length }}
         </span>
       </div>
-      <button
-        @click="emit('refresh')"
-        class="text-xs px-2 py-1 rounded-md transition-colors hover:opacity-80"
-        style="color: var(--text-tertiary);"
-        :disabled="loading"
-      >
-        {{ loading ? '刷新中...' : '刷新' }}
-      </button>
+      <div class="flex items-center gap-1">
+        <button
+          @click="exportCSV"
+          class="text-[10px] px-2 py-1 rounded-md transition-colors hover:opacity-80"
+          style="color: var(--accent);"
+          title="导出 CSV"
+        >导出</button>
+        <button
+          @click="emit('refresh')"
+          class="text-xs px-2 py-1 rounded-md transition-colors hover:opacity-80"
+          style="color: var(--text-tertiary);"
+          :disabled="loading"
+        >{{ loading ? '刷新中...' : '刷新' }}</button>
+      </div>
     </div>
 
     <!-- 消息列表 -->

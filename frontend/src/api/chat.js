@@ -68,4 +68,27 @@ export async function confirmSend(params) {
   return data
 }
 
+// ═══════════════════════════════════════════════
+// 操作日志
+// ═══════════════════════════════════════════════
+
+export async function recordOperation(params) {
+  const { data } = await http.post('/operation_log', params)
+  return data
+}
+
+export async function fetchOperationLogs(limit = 50) {
+  const { data } = await http.get('/operation_log', { params: { limit } })
+  return data
+}
+
+// ═══════════════════════════════════════════════
+// 数据看板
+// ═══════════════════════════════════════════════
+
+export async function fetchDashboard() {
+  const { data } = await http.get('/dashboard')
+  return data
+}
+
 export default http
