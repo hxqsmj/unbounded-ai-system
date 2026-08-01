@@ -15,8 +15,11 @@
   # 默认 (ComWeChatRobot 在本地 :5555)
   python scripts/wechat_bridge.py --account sales_01
 
-  # 连接 WSS Gateway
+  # 连接本机 WSS Gateway
   python scripts/wechat_bridge.py --account sales_01 --gateway ws://127.0.0.1:8765
+
+  # 连接公网服务器 (生产, 需带 API Token)
+  python scripts/wechat_bridge.py --account sales_01 --gateway ws://47.116.45.128:8765 --token <API_TOKEN>
 
   # 使用可爱猫框架
   python scripts/wechat_bridge.py --account sales_01 --driver icat --hook-url http://127.0.0.1:8090
@@ -155,10 +158,17 @@ class WeChatBridge:
     └──────────┘    HTTP     └──────────┘    WSS     └──────────┘
     """
 
-    def __init__(self, account_id: str, driver, gateway_url: str = "ws://127.0.0.1:8765"):
+    def __init__(
+        self,
+        account_id: str,
+        driver,
+        gateway_url: str = "ws://127.0.0.1:8765",
+        token: str = "",
+    ):
         self.account_id = account_id
         self.driver = driver
         self.gateway_url = gateway_url
+        self.token = token
         self.ws: Optional[websockets.ClientConnection] = None
         self._running = False
 
@@ -181,7 +191,10 @@ class WeChatBridge:
 
     async def _connect_gateway(self):
         """连接 WSS Gateway，带重试"""
+        # 鉴权: 配置了 API Token 时拼到 URL query (服务器 process_request 握手校验)
         url = f"{self.gateway_url}/ws/hook/{self.account_id}"
+        if self.token:
+            url += f"?token={self.token}"
         retries = 0
         while self._running:
             try:
@@ -322,8 +335,8 @@ if __name__ == "__main__":
   # 指定 Hook 框架和地址
   python scripts/wechat_bridge.py --account sales_01 --driver comwechat --hook-url http://127.0.0.1:5555
 
-  # 连接远程 WSS Gateway
-  python scripts/wechat_bridge.py --account sales_01 --gateway ws://0.tcp.ngrok.io:12345
+  # 连接远程 WSS Gateway (公网直连, 生产环境必带 --token)
+  python scripts/wechat_bridge.py --account sales_01 --gateway ws://47.116.45.128:8765 --token <API_TOKEN>
 
 驱动选项:
   comwechat  — ComWeChatRobot (开源, 推荐)
@@ -334,6 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--driver", "-d", default="comwechat", choices=["comwechat", "icat"])
     parser.add_argument("--hook-url", default=None, help="Hook 框架 HTTP API 地址")
     parser.add_argument("--gateway", "-g", default="ws://127.0.0.1:8765", help="WSS Gateway 地址")
+    parser.add_argument("--token", default="", help="API Token (服务器启用鉴权后必填)")
     args = parser.parse_args()
 
     # 选择驱动
@@ -348,6 +362,7 @@ if __name__ == "__main__":
         account_id=args.account,
         driver=driver,
         gateway_url=args.gateway,
+        token=args.token,
     )
 
     print(f"""
@@ -357,6 +372,7 @@ if __name__ == "__main__":
   驱动: {args.driver} ({url})
   账号: {args.account}
   网关: {args.gateway}/ws/hook/{args.account}
+  鉴权: {'✅ 已启用 (token 已配置)' if args.token else '⚠️ 未配置 token (服务器启用鉴权后将无法连接)'}
 {'=' * 55}
 
 💡 确保以下服务已启动:
