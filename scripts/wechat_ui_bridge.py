@@ -171,9 +171,10 @@ class WeChatOperator:
         self.focus()
         time.sleep(0.2)
 
-        # 点击消息区域 (屏幕中央偏右)
-        screen_w, screen_h = pyautogui.size()
-        pyautogui.click(screen_w // 2 + 100, screen_h // 2 - 50)
+        # 修复: 用窗口句柄计算会话区坐标 (窗口任意位置/大小都能点对)
+        # 之前用屏幕固定坐标, 窗口不在中央时点击会落在聊天列表上导致乱切聊天
+        cx, cy = self._window_point(0.6, 0.45)
+        pyautogui.click(cx, cy)
         time.sleep(0.2)
 
         # Ctrl+A 全选 → Ctrl+C 复制
@@ -212,9 +213,9 @@ class WeChatOperator:
         self.focus()
         time.sleep(0.2)
 
-        # 点击输入框 (屏幕下方)
-        screen_w, screen_h = pyautogui.size()
-        pyautogui.click(screen_w // 2, screen_h - 80)
+        # 修复: 用窗口句柄定位输入框 (窗口底部中央, 任意窗口位置有效)
+        cx, cy = self._window_point(0.5, 0.92)
+        pyautogui.click(cx, cy)
         time.sleep(0.2)
 
         # 清空 + 粘贴 + 发送
@@ -255,6 +256,26 @@ class WeChatOperator:
 
         self.current_chat = contact
         return True
+
+    def _window_point(self, ratio_x: float, ratio_y: float) -> tuple:
+        """
+        计算微信窗口客户区内的相对坐标 (屏幕绝对坐标)。
+
+        用窗口句柄 GetClientRect + ClientToScreen, 不依赖屏幕固定位置,
+        避免窗口不在屏幕中央时点击到聊天列表导致乱切聊天。
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        user32.GetClientRect(self.hwnd, ctypes.byref(rect))
+        pt = wintypes.POINT(0, 0)
+        user32.ClientToScreen(self.hwnd, ctypes.byref(pt))
+        return (
+            int(pt.x + rect.right * ratio_x),
+            int(pt.y + rect.bottom * ratio_y),
+        )
 
     @staticmethod
     def _is_pseudo_name(name: str) -> bool:
