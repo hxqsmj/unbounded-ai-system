@@ -23,6 +23,13 @@ function unlockField(field) {
   else operatorReadonly.value = false
 }
 
+// 一键登录: 绕过手动输入 (自动填充/输入法干扰全避开)
+function quickLogin() {
+  loginToken.value = 'admin'
+  if (!loginOperator.value.trim()) loginOperator.value = 'admin'
+  doLogin()
+}
+
 function doLogin() {
   if (!loginToken.value.trim()) {
     loginError.value = '请输入 API Token'
@@ -284,6 +291,14 @@ import { Search, Moon, Sunny, SwitchButton } from '@element-plus/icons-vue'
             style="background: linear-gradient(135deg, #5b5cff, #6366f1); border-color: transparent;"
           >
             登 录
+          </el-button>
+          <el-button
+            size="large"
+            class="w-full"
+            @click="quickLogin"
+            style="background: var(--bg-hover); border-color: var(--border); color: var(--accent);"
+          >
+            ⚡ 一键登录 (admin)
           </el-button>
           <p v-if="loginError" class="text-[12px] text-center" style="color: var(--red);">{{ loginError }}</p>
           <p class="text-[10px] leading-relaxed" style="color: var(--text-tertiary);">
