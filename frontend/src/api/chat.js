@@ -37,12 +37,17 @@ http.interceptors.request.use((config) => {
 })
 
 // 响应拦截: 401 → 清除本地凭证并刷新页面（回到登录界面）
+// 修复: 防无限刷新死循环 — token 无效时 reload 后仍 401，若每次立即 reload
+// 会形成死循环打满服务器限流(429)。3 秒内只允许 reload 一次，页面停在登录界面。
+let lastReloadTime = 0
 http.interceptors.response.use(
   (resp) => resp,
   (error) => {
     if (error.response?.status === 401) {
       clearAuth()
-      if (!window.location.hash.includes('auth')) {
+      const now = Date.now()
+      if (now - lastReloadTime > 3000) {
+        lastReloadTime = now
         window.location.reload()
       }
     }

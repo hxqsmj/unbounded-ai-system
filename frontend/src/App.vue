@@ -213,6 +213,7 @@ watch(activeTab, (tab) => {
 // ── 初始化 ──────────────────────────────────
 let pollTimer = null
 onMounted(() => {
+  if (!isAuthed.value) return // 未登录不加载数据（避免 401 循环）
   loadQueue()
   pollTimer = setInterval(loadQueue, 8000)
 })

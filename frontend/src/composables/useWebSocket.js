@@ -37,6 +37,12 @@ export function useWebSocket(options = {}) {
       return
     }
 
+    // 修复: 未登录(无 token)时不发起连接，避免空 token 反复 403
+    if (!getToken()) {
+      console.warn('[WS] 未登录，跳过 WebSocket 连接')
+      return
+    }
+
     try {
       ws = new WebSocket(wsUrl)
 
