@@ -151,8 +151,25 @@ class WeChatOperator:
         return ""
 
     def focus(self):
-        """确保微信在前台"""
-        if self.hwnd:
+        """
+        确保微信在前台 (抢焦点)。
+
+        修复: SetForegroundWindow 受 Windows 前台锁定限制, 用户操作其他窗口时
+        抢焦点失败, Ctrl+A/Ctrl+C 会作用到其他窗口(如审核面板页面)。
+        最小化再还原是可靠的抢焦点方式。
+        """
+        if not self.hwnd:
+            return
+        import ctypes
+        SW_MINIMIZE = 6
+        SW_RESTORE = 9
+        user32 = ctypes.windll.user32
+        try:
+            user32.ShowWindow(self.hwnd, SW_MINIMIZE)
+            time.sleep(0.15)
+            user32.ShowWindow(self.hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(self.hwnd)
+        except Exception:
             bring_to_front(self.hwnd)
 
     def read_current_chat(self) -> str:
@@ -190,6 +207,10 @@ class WeChatOperator:
         # 从最后一条往前找未处理且非己方的消息
         lines = [l.strip() for l in clipboard.split('\n') if l.strip()]
         for text in reversed(lines):
+            # 修复: 抢焦点失败时 Ctrl+C 可能复制到其他窗口(如审核面板/浏览器)的内容,
+            # 含面板特征词的文本直接丢弃
+            if self._looks_like_panel_content(text):
+                continue
             h = hash(text)
             if h in self._sent_hashes:
                 continue  # 自己刚发的回复，跳过
@@ -201,6 +222,20 @@ class WeChatOperator:
             return text
 
         return ""  # 没有新客户消息
+
+    @staticmethod
+    def _looks_like_panel_content(text: str) -> bool:
+        """
+        判断文本是否来自审核面板/其他窗口的误复制。
+
+        面板页面含 trace_id / AI 建议 / sales_01 / 账号 等特征词。
+        """
+        markers = (
+            "trace_id", "trace-", "AI 建议", "AI建议", "sales_0", "一键采纳",
+            "审核工作台", "cust_smoke", "edge.jxnh", "pending", "确认发送",
+            "已为您记录", "兜底",
+        )
+        return any(m in text for m in markers)
 
     def send_reply(self, text: str) -> bool:
         """
