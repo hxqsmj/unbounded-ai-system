@@ -111,6 +111,30 @@ class WeChatOperator:
         self.current_chat: str = ""
         self._msg_hashes = set()   # 已处理（读取过）的消息
         self._sent_hashes = set()  # 自己发送过的消息（防止 AI 回复被当成客户消息读回）
+        self._sent_file = Path(__file__).resolve().parent / "wechat_sent_hashes.txt"
+        self._load_sent_hashes()
+
+    def _load_sent_hashes(self):
+        """加载历史已发送记录 (持久化, 重启后仍能识别自己发过的消息, 防自我循环)"""
+        try:
+            if self._sent_file.exists():
+                for line in self._sent_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        self._sent_hashes.add(int(line))
+                log("I", f"已加载 {len(self._sent_hashes)} 条历史发送记录")
+        except Exception as e:
+            log("⚠", f"加载历史发送记录失败: {e}")
+
+    def _save_sent_hashes(self):
+        """持久化已发送记录"""
+        try:
+            self._sent_file.write_text(
+                "\n".join(str(h) for h in self._sent_hashes),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            log("⚠", f"保存发送记录失败: {e}")
 
     def init(self) -> bool:
         self.hwnd = find_wechat_window()
@@ -200,11 +224,12 @@ class WeChatOperator:
         time.sleep(0.2)
         pyautogui.press('enter')
 
-        # 记录本次发送的消息: 防止下次轮询把 AI 自己的回复当成客户消息
+        # 记录本次发送的消息: 防止下次轮询把 AI 自己的回复当成客户消息 (并持久化)
         self._sent_hashes.add(hash(text.strip()))
         if len(self._sent_hashes) > 200:
             # 保留最近 200 条，避免无限增长
             self._sent_hashes = set(list(self._sent_hashes)[-200:])
+        self._save_sent_hashes()
 
         log("✓", f"📨 已发送: '{text[:40]}...'")
         return True
