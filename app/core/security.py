@@ -27,6 +27,8 @@ def _token_matches(provided: str) -> bool:
         return True  # 未配置 token 时放行（仅限开发）
     if not provided:
         return False
+    # 容忍首尾空白 (手机输入法/粘贴易带空格)
+    provided = provided.strip()
     return hmac.compare_digest(provided.encode(), settings.api_token.encode())
 
 
