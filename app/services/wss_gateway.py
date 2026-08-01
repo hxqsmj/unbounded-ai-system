@@ -20,12 +20,22 @@ import json
 import time
 from datetime import datetime
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import websockets
 from websockets.asyncio.server import ServerConnection
 
+# websockets 15.x: Response 位于 websockets.http11；旧版本在 websockets.http
+try:
+    from websockets.http11 import Headers as WsHeaders
+    from websockets.http11 import Response as WsResponse
+except ImportError:
+    from websockets.http import Headers as WsHeaders
+    from websockets.http import Response as WsResponse
+
 from app.core.config import settings
+from app.core.security import verify_ws_token
 
 
 # ════════════════════════════════════════════════════════════
@@ -148,11 +158,25 @@ class ConnectionManager:
     # ── 消息缓冲 (断线重连恢复) ─────────────────────────────
 
     def buffer_for_hook(self, account_id: str, msg: dict) -> None:
-        """将消息加入 Hook 的待发送缓冲"""
+        """
+        将消息加入 Hook 的待发送缓冲。
+
+        缓冲有上限 (settings.wss_buffer_max)，防止 Hook 长期离线时无限增长。
+        超限时丢弃最旧消息并告警（新消息优先保留）。
+        """
+        target = None
         if account_id in self._hooks:
-            self._hooks[account_id].setdefault("buffer", []).append(msg)
+            target = self._hooks[account_id].setdefault("buffer", [])
         else:
-            self._pending_sends.setdefault(account_id, []).append(msg)
+            target = self._pending_sends.setdefault(account_id, [])
+
+        if len(target) >= settings.wss_buffer_max:
+            dropped = target.pop(0)
+            print(
+                f"[WSS] ⚠️ 缓冲已达上限 ({settings.wss_buffer_max})，"
+                f"丢弃最旧消息: {str(dropped)[:40]}... (account={account_id})"
+            )
+        target.append(msg)
 
     def drain_buffer(self, account_id: str) -> list[dict]:
         """取出并清空缓冲消息"""
@@ -239,6 +263,10 @@ class WSSGateway:
         """转发客户消息到后端 AI Brain，返回生成结果"""
         http = await self._ensure_http()
         try:
+            # 网关→后端内部调用同样携带 API Token（后端启用鉴权后必须）
+            headers = {}
+            if settings.api_token:
+                headers["X-API-Token"] = settings.api_token
             resp = await http.post(
                 f"{self.backend_api_base}/api/v1/chat/generate",
                 json={
@@ -247,6 +275,7 @@ class WSSGateway:
                     "user_message": content,
                     "history": [],
                 },
+                headers=headers,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -381,22 +410,52 @@ class WSSGateway:
         finally:
             self.mgr.unregister_frontend(ws)
 
+    def _auth_process_request(self, connection, request):
+        """
+        握手前鉴权 (process_request 钩子)。
+
+        settings.api_token 非空时，所有连接必须携带 ?token=xxx 查询参数，
+        否则在 HTTP 握手阶段直接返回 401 拒绝（防止任何人顶替真实 Hook）。
+        返回 None 表示放行。
+        """
+        # websockets 15.x: 握手阶段 request.query 为 None，
+        # 必须从 request.path 中自行解析查询参数
+        raw_path = getattr(request, "path", "/")
+        parsed = urlparse(raw_path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+        token = (params.get("token") or [""])[0]
+
+        if not verify_ws_token(token):
+            print(f"[WSS] 🔒 握手拒绝未授权连接: {path} (token 缺失/无效)")
+            return WsResponse(
+                401,
+                "Unauthorized",
+                WsHeaders({"Content-Type": "text/plain"}),
+                b"unauthorized: invalid token",
+            )
+        return None
+
     async def _handle_connection(self, ws: ServerConnection) -> None:
         """
         统一连接入口，根据 WebSocket 路径区分客户端类型。
 
         路径约定:
-          /ws/hook/{account_id} → Hook 客户端
-          /ws                → 前端面板
+          /ws/hook/{account_id}?token=xxx → Hook 客户端
+          /ws?token=xxx                   → 前端面板
+
+        鉴权: 已在 process_request 握手阶段完成（_auth_process_request），
+        此处仅做路由分发。
         """
-        path = ws.request.path if hasattr(ws, 'request') else "/"
+        raw_path = ws.request.path if hasattr(ws, 'request') else "/"
+        path = urlparse(raw_path).path
 
         if "/ws/hook/" in path:
             account_id = path.split("/ws/hook/")[-1]
-            print(f"[WSS] Hook connecting: {account_id}")
+            print(f"[WSS] 🔑 Hook connecting (authorized): {account_id}")
             await self._handle_hook(ws, account_id)
         else:
-            print(f"[WSS] Frontend connecting (path={path})")
+            print(f"[WSS] 🔑 Frontend connecting (authorized, path={path})")
             await self._handle_frontend(ws)
 
     # ── 心跳监测后台任务 ────────────────────────────────────
@@ -437,6 +496,7 @@ class WSSGateway:
             self._handle_connection,
             self.host,
             self.port,
+            process_request=self._auth_process_request,
         )
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 

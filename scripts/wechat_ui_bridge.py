@@ -109,7 +109,8 @@ class WeChatOperator:
     def __init__(self):
         self.hwnd: Optional[int] = None
         self.current_chat: str = ""
-        self._msg_hashes = set()
+        self._msg_hashes = set()   # 已处理（读取过）的消息
+        self._sent_hashes = set()  # 自己发送过的消息（防止 AI 回复被当成客户消息读回）
 
     def init(self) -> bool:
         self.hwnd = find_wechat_window()
@@ -132,10 +133,14 @@ class WeChatOperator:
 
     def read_current_chat(self) -> str:
         """
-        读取当前聊天窗口的最新消息。
+        读取当前聊天窗口的最新客户消息。
 
         策略: 点击消息区域 → Ctrl+A → Ctrl+C → 读取剪贴板
-        取最后一段非己方消息。
+        从最后一条消息往前找「第一条未被处理过、且不是自己发送的」消息。
+
+        修复: 旧实现只取最后一行——AI 刚发出的回复会排在最下方，
+        被当成客户消息读回，形成"AI 回复→触发 AI 再回复"的自我循环。
+        现在跳过自己发送过的消息（_sent_hashes），再往前找真正的客户消息。
         """
         import pyautogui
 
@@ -157,22 +162,20 @@ class WeChatOperator:
         if not clipboard:
             return ""
 
-        # 取最后一段有意义的消息
+        # 从最后一条往前找未处理且非己方的消息
         lines = [l.strip() for l in clipboard.split('\n') if l.strip()]
-        if not lines:
-            return ""
+        for text in reversed(lines):
+            h = hash(text)
+            if h in self._sent_hashes:
+                continue  # 自己刚发的回复，跳过
+            if h in self._msg_hashes:
+                continue  # 已处理过，跳过
+            self._msg_hashes.add(h)
+            if len(self._msg_hashes) > 500:
+                self._msg_hashes.clear()
+            return text
 
-        text = lines[-1]
-
-        # 去重
-        h = hash(text)
-        if h in self._msg_hashes:
-            return ""
-        self._msg_hashes.add(h)
-        if len(self._msg_hashes) > 500:
-            self._msg_hashes.clear()
-
-        return text
+        return ""  # 没有新客户消息
 
     def send_reply(self, text: str) -> bool:
         """
@@ -196,6 +199,12 @@ class WeChatOperator:
         type_text(text)
         time.sleep(0.2)
         pyautogui.press('enter')
+
+        # 记录本次发送的消息: 防止下次轮询把 AI 自己的回复当成客户消息
+        self._sent_hashes.add(hash(text.strip()))
+        if len(self._sent_hashes) > 200:
+            # 保留最近 200 条，避免无限增长
+            self._sent_hashes = set(list(self._sent_hashes)[-200:])
 
         log("✓", f"📨 已发送: '{text[:40]}...'")
         return True

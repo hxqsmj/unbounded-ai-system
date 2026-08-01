@@ -14,10 +14,21 @@ Task 3: 人机协作与数据回流接口 (Human-in-the-Loop API V3.0)
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException
+# 业务时区: 全系统统计口径统一使用 Asia/Shanghai
+_SH_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _sh_today_utc() -> datetime:
+    """上海时区的"今日 00:00"转换为 UTC（Mongo 按 UTC 存储/查询）"""
+    now_sh = datetime.now(_SH_TZ)
+    today_sh = now_sh.replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_sh.astimezone(timezone.utc)
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 # 可选依赖 — lazy import 以支持 Mock 测试
 try:
@@ -88,11 +99,12 @@ class HumanLoop:
                 max_size=5,
             )
             # 确保表存在
+            # ⚠ 表结构与 deploy/setup.sh 保持一致 (trace_id UNIQUE，幂等去重)
             async with self._pg_pool.acquire() as conn:
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS rag_feedback (
                         id SERIAL PRIMARY KEY,
-                        trace_id VARCHAR(64) NOT NULL,
+                        trace_id VARCHAR(64) UNIQUE NOT NULL,
                         context_text TEXT NOT NULL,
                         ai_raw_output TEXT NOT NULL,
                         human_edited_output TEXT NOT NULL,
@@ -106,14 +118,14 @@ class HumanLoop:
 
     async def confirm_send(self, request: ConfirmSendRequest) -> ConfirmSendResponse:
         """
-        人工确认发送流程。
+        人工确认发送流程 (V4.1 幂等版)。
 
         处理流程:
           1. 查询 MongoDB trace_log 获取原始记录
           2. 数据飞轮: is_modified → 异步(非阻塞)写入 PostgreSQL rag_feedback
-          3. ACCEPT/MODIFY → 调用 TypingSimulator 延迟入队
-          4. REJECT → 直接返回 REJECTED
-          5. 更新 MongoDB trace_log 状态
+          3. ACCEPT/MODIFY → 调用 TypingSimulator 延迟入队（成功才标记 SENT）
+          4. REJECT → PENDING→CANCELLED 原子更新
+          5. 幂等: 状态已非 PENDING 的 trace 不重复入队，直接返回当前状态
 
         Args:
             request: 包含 trace_id, final_text, is_modified, action
@@ -122,7 +134,7 @@ class HumanLoop:
             ConfirmSendResponse
 
         Raises:
-            HTTPException: trace_id 不存在时 404
+            HTTPException: trace_id 不存在时 404 / 入队失败时 500 / 休眠时段 400
         """
         await self._ensure_mongo()
 
@@ -134,62 +146,132 @@ class HumanLoop:
                 detail=f"Trace '{request.trace_id}' not found.",
             )
 
+        # 幂等拦截: 已被处理过 (SENT/CANCELLED) 的 trace 直接返回，绝不重复入队
+        if doc.get("status") != "PENDING":
+            print(
+                f"[HumanLoop] ⚠️ Trace {request.trace_id} 已被处理 (status={doc.get('status')})，"
+                f"拒绝重复操作 (action={request.action})"
+            )
+            already_done = doc.get("status") == "SENT"
+            return ConfirmSendResponse(
+                trace_id=request.trace_id,
+                status="ALREADY_DONE",
+                message=(
+                    "该消息已处理，请勿重复操作。"
+                    if already_done
+                    else "该消息已被拒绝处理。"
+                ),
+            )
+
+        # 夜间休眠拦截 (与 Worker 侧保持一致，入队前统一拒绝)
+        if request.action in ("ACCEPT", "MODIFY") and self.simulator.is_sleep_time():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"当前处于夜间休眠时段 "
+                    f"({settings.sleep_start_hour}:00 - {settings.sleep_end_hour}:00)，"
+                    f"为保证账号安全，消息已暂停发送，请稍后重试。"
+                ),
+            )
+
         # Step 2: 数据飞轮 — 若人工修改，异步非阻塞写入 PostgreSQL
         # 关键: 使用 asyncio.create_task + try-except 包裹，PG 故障绝不阻断主流程
         if request.is_modified and request.action == "MODIFY":
             asyncio.create_task(
                 self._write_feedback_safe(
                     trace_id=request.trace_id,
-                    context_text=str(doc.get("retrieved_docs", "")),
+                    context_text=self._docs_to_readable_text(doc.get("retrieved_docs", [])),
                     ai_raw_output=doc.get("llm_raw_output", ""),
                     human_edited_output=request.final_text,
                 )
             )
 
-        # Step 3: 根据 action 决定是否进入延迟发送队列
-        if request.action in ("ACCEPT", "MODIFY"):
+        # Step 3: REJECT — PENDING→CANCELLED 原子更新（幂等，仅当仍为 PENDING）
+        if request.action == "REJECT":
+            update_fields = {
+                "human_intervention": request.is_modified,
+                "final_sent_output": request.final_text,
+                "status": "CANCELLED",
+            }
+            await self._trace_collection.update_one(
+                {"trace_id": request.trace_id, "status": "PENDING"},
+                {"$set": update_fields},
+            )
+            print(
+                f"[HumanLoop] Trace: {request.trace_id} | "
+                f"Action: REJECT | Modified: {request.is_modified}"
+            )
+            return ConfirmSendResponse(
+                trace_id=request.trace_id,
+                status="REJECTED",
+                message="消息已拒绝发送，未进入延迟队列。",
+            )
+
+        # Step 4: ACCEPT/MODIFY — 先入队，成功后才标记 SENT
+        # 顺序关键: 入队失败绝不标记 SENT，避免"系统显示已发送、客户没收到"
+        try:
             await self._enqueue_to_delay_queue(
                 trace_id=request.trace_id,
                 account_id=doc["account_id"],
                 customer_id=doc["customer_id"],
                 text=request.final_text,
             )
+        except Exception as e:
+            # 入队失败（Redis 不可用/超时等）→ 状态保持 PENDING，可稍后重试
+            print(
+                f"[HumanLoop] ❌ Trace {request.trace_id} 入队失败，状态保持 PENDING: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"消息入队失败，未标记为已发送，请稍后重试。({type(e).__name__}: {e})",
+            )
 
-        # Step 4: 更新 MongoDB trace_log 状态
+        # 入队成功 → PENDING→SENT 原子更新（双操作员并发时只有一次成功）
         update_fields = {
             "human_intervention": request.is_modified,
             "final_sent_output": request.final_text,
-            "status": "SENT" if request.action != "REJECT" else "CANCELLED",
+            "status": "SENT",
         }
-
         if request.is_modified:
             update_fields["human_edited_output"] = request.final_text
 
         await self._trace_collection.update_one(
-            {"trace_id": request.trace_id},
+            {"trace_id": request.trace_id, "status": "PENDING"},
             {"$set": update_fields},
         )
 
         print(
             f"[HumanLoop] Trace: {request.trace_id} | "
             f"Action: {request.action} | "
-            f"Modified: {request.is_modified}"
+            f"Modified: {request.is_modified} | ✅ 入队成功，状态 → SENT"
         )
 
-        # Step 5: 构建符合 Spec 的响应
-        if request.action == "REJECT":
-            return ConfirmSendResponse(
-                trace_id=request.trace_id,
-                status="REJECTED",
-                message="消息已拒绝发送，未进入延迟队列。",
-            )
-        else:
-            mode = "Redis" if self.simulator.redis_url else "内存"
-            return ConfirmSendResponse(
-                trace_id=request.trace_id,
-                status="QUEUED",
-                message=f"消息已进入{mode}延迟发送队列。",
-            )
+        mode = "Redis" if self.simulator.redis_url else "内存"
+        return ConfirmSendResponse(
+            trace_id=request.trace_id,
+            status="QUEUED",
+            message=f"消息已进入{mode}延迟发送队列。",
+        )
+
+    @staticmethod
+    def _docs_to_readable_text(retrieved_docs) -> str:
+        """
+        将 RAG 检索文档序列化为可读文本（用于数据飞轮）。
+
+        旧实现 str(docs) 存 Python repr，不可读且无法用于后续微调。
+        """
+        if isinstance(retrieved_docs, str):
+            return retrieved_docs
+        if not retrieved_docs:
+            return ""
+        parts = []
+        for i, doc in enumerate(retrieved_docs):
+            if isinstance(doc, dict):
+                parts.append(f"[来源 {i + 1}] {doc.get('text', '')}")
+            else:
+                parts.append(f"[来源 {i + 1}] {str(doc)}")
+        return "\n".join(parts)
 
     # ── 数据飞轮 ────────────────────────────────────────────
 
@@ -216,11 +298,18 @@ class HumanLoop:
         )
         try:
             async with self._pg_pool.acquire() as conn:
+                # ON CONFLICT 幂等更新: 同一 trace 重复 MODIFY 时覆盖旧反馈，不报错
                 await conn.execute(
                     """
                     INSERT INTO rag_feedback
                         (trace_id, context_text, ai_raw_output, human_edited_output, status, created_at)
                     VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (trace_id) DO UPDATE SET
+                        context_text = EXCLUDED.context_text,
+                        ai_raw_output = EXCLUDED.ai_raw_output,
+                        human_edited_output = EXCLUDED.human_edited_output,
+                        status = EXCLUDED.status,
+                        created_at = EXCLUDED.created_at
                     """,
                     feedback.trace_id,
                     feedback.context_text,
@@ -278,28 +367,25 @@ class HumanLoop:
           - redis_url 已配置 → Redis ZSET
           - 否则 → 降级为 asyncio.create_task 手动延迟
         """
-        try:
-            if self.simulator.redis_url:
-                await self.simulator.enqueue_message_redis(
+        if self.simulator.redis_url:
+            await self.simulator.enqueue_message_redis(
+                trace_id=trace_id,
+                account_id=account_id,
+                to_user=customer_id,
+                text=text,
+            )
+        else:
+            # 内存模式降级: 使用 create_task 非阻塞延迟
+            async def _delayed_send():
+                await self.simulator.schedule_message_memory(
                     trace_id=trace_id,
                     account_id=account_id,
                     to_user=customer_id,
                     text=text,
+                    send_callback=self._default_send_callback,
                 )
-            else:
-                # 内存模式降级: 使用 create_task 非阻塞延迟
-                async def _delayed_send():
-                    await self.simulator.schedule_message_memory(
-                        trace_id=trace_id,
-                        account_id=account_id,
-                        to_user=customer_id,
-                        text=text,
-                        send_callback=self._default_send_callback,
-                    )
 
-                asyncio.create_task(_delayed_send())
-        except Exception as e:
-            print(f"[HumanLoop] ⚠️ Enqueue failed for {trace_id}: {e}")
+            asyncio.create_task(_delayed_send())
 
     # ── 默认发送回调 ────────────────────────────────────────
 
@@ -397,9 +483,9 @@ class HumanLoop:
         return await self._trace_collection.count_documents({"status": "PENDING"})
 
     async def get_stats(self) -> dict:
-        """获取审核工作台统计数据"""
+        """获取审核工作台统计数据 (按 Asia/Shanghai 时区计算"今日")"""
         await self._ensure_mongo()
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = _sh_today_utc()
 
         pending = await self._trace_collection.count_documents({"status": "PENDING"})
         processed_today = await self._trace_collection.count_documents({
@@ -435,7 +521,14 @@ class HumanLoop:
 # FastAPI 路由
 # ════════════════════════════════════════════════════════════
 
-human_loop_router = APIRouter(prefix="/api/v1/chat", tags=["Human-in-the-Loop"])
+# 鉴权: 整个 /api/v1/chat 路由组统一校验 API Token
+from app.core.security import verify_api_token
+
+human_loop_router = APIRouter(
+    prefix="/api/v1/chat",
+    tags=["Human-in-the-Loop"],
+    dependencies=[Depends(verify_api_token)],
+)
 
 # 全局实例
 _loop_instance: Optional[HumanLoop] = None
@@ -467,7 +560,10 @@ async def confirm_send(request: ConfirmSendRequest):
 
 
 @human_loop_router.get("/pending")
-async def get_pending(limit: int = 50, offset: int = 0):
+async def get_pending(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
     """
     获取待审核队列 (状态为 PENDING 的 trace 列表)。
 
@@ -518,7 +614,7 @@ async def add_operation_log(request: dict):
 
 
 @human_loop_router.get("/operation_log")
-async def get_operation_logs(limit: int = 50):
+async def get_operation_logs(limit: int = Query(50, ge=1, le=200)):
     """获取最近操作日志"""
     loop = get_loop()
     await loop._ensure_mongo()
@@ -545,8 +641,7 @@ async def get_dashboard():
     log_coll = loop.mongo[settings.mongo_db]["operation_logs"]
 
     from datetime import timedelta
-    now = datetime.utcnow()
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = _sh_today_utc()  # 上海时区今日零点（转 UTC 查询）
     week_ago = today - timedelta(days=7)
 
     # 基础统计
@@ -571,21 +666,21 @@ async def get_dashboard():
     async for r in trace_coll.aggregate(pipeline):
         by_account[r["_id"]] = r["count"]
 
-    # 按小时趋势 (今日)
+    # 按小时趋势 (今日) — 按上海时区聚合
     hour_pipeline = [
         {"$match": {"timestamp": {"$gte": today}}},
-        {"$group": {"_id": {"$hour": "$timestamp"}, "count": {"$sum": 1}}},
+        {"$group": {"_id": {"$hour": {"date": "$timestamp", "timezone": "Asia/Shanghai"}}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
     hourly = {}
     async for r in trace_coll.aggregate(hour_pipeline):
         hourly[str(r["_id"])] = r["count"]
 
-    # 上周趋势
+    # 上周趋势 — 按上海时区聚合日期
     week_pipeline = [
         {"$match": {"timestamp": {"$gte": week_ago}}},
         {"$group": {
-            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp", "timezone": "Asia/Shanghai"}},
             "total": {"$sum": 1},
             "fallback": {"$sum": {"$cond": [{"$eq": ["$llm_raw_output", None]}, 1, 0]}},
         }},
@@ -631,6 +726,10 @@ if __name__ == "__main__":
     class MockHumanLoop(HumanLoop):
         """Mock HumanLoop: 模拟数据库操作"""
 
+        def __init__(self):
+            # 强制内存模式: 测试不依赖 Redis 库/服务
+            super().__init__(typing_simulator=TypingSimulator(redis_url=TypingSimulator.MEMORY))
+
         async def _ensure_mongo(self):
             pass
 
@@ -640,6 +739,10 @@ if __name__ == "__main__":
         async def _write_feedback(self, trace_id, context_text, ai_raw_output, human_edited_output):
             print(f"   [Mock] Feedback written: {trace_id} (PG)")
             return None
+
+        def is_sleep_time(self):
+            # 测试环境忽略夜间休眠窗口
+            return False
 
     mock_loop = MockHumanLoop()
     set_loop(mock_loop)
@@ -651,12 +754,13 @@ if __name__ == "__main__":
             "trace_id": "test-tr-001",
             "account_id": "sales_01",
             "customer_id": "cust_001",
-            "retrieved_docs": "产品A文档内容",
+            "retrieved_docs": [{"text": "产品A文档内容", "score": 0.9, "metadata": {}}],
             "llm_raw_output": "产品A价格是100元",
+            "status": "PENDING",
         }
 
     async def _mock_update_one(*a, **kw):
-        return None
+        return type("UpdateResult", (), {"matched_count": 1})()
 
     mock_loop._trace_collection = type("MockCol", (), {
         "find_one": _mock_find_one,

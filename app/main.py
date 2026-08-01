@@ -17,11 +17,17 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+except ImportError:
+    AsyncIOMotorClient = None  # type: ignore
+
 from app.core.config import settings
+from app.core.security import auth_enabled, verify_ws_token
 from app.services.ai_brain import (
     AIBrain,
     ai_brain_router,
@@ -34,6 +40,7 @@ from app.services.human_loop import (
     set_loop,
 )
 from app.services.typing_simulator import TypingSimulator
+from app.services.wss_gateway import WSSGateway
 
 # ════════════════════════════════════════════════════════════
 # 全局服务引用
@@ -43,6 +50,7 @@ _brain: Optional[AIBrain] = None
 _loop: Optional[HumanLoop] = None
 _simulator: Optional[TypingSimulator] = None
 _worker_task: Optional[asyncio.Task] = None
+_gateway: Optional[WSSGateway] = None
 
 
 # ════════════════════════════════════════════════════════════
@@ -110,12 +118,20 @@ async def lifespan(app: FastAPI):
       1. 停止 Worker
       2. 关闭所有连接
     """
-    global _brain, _loop, _simulator, _worker_task
+    global _brain, _loop, _simulator, _worker_task, _gateway
 
     # ── Startup ─────────────────────────────────────────────
     print("=" * 60)
     print(f"🚀 {settings.app_name} v{settings.app_version} starting...")
     print("=" * 60)
+
+    # ⚠ 鉴权状态检查
+    if not auth_enabled():
+        print("=" * 60)
+        print("⚠️⚠️ 警告: 未设置 API_TOKEN，系统当前无鉴权状态！")
+        print("   任何能访问本服务的人都可以读取/操作全部客户对话。")
+        print("   生产环境必须在 .env 中设置 API_TOKEN！")
+        print("=" * 60)
 
     # 1. TypingSimulator
     _simulator = TypingSimulator(redis_url=settings.redis_url)
@@ -124,7 +140,10 @@ async def lifespan(app: FastAPI):
     # 2. AIBrain
     _brain = AIBrain()
     set_brain(_brain)
-    set_on_generated(lambda data: notify_frontend(data))
+    # 修复: 注入 async 包装，避免 ai_brain 中 create_task(同步返回值) 抛 TypeError
+    async def _on_generated_async(data: dict[str, Any]) -> None:
+        notify_frontend(data)
+    set_on_generated(_on_generated_async)
     print("   AIBrain: initialized (+ WS push)")
 
     # 3. HumanLoop
@@ -132,16 +151,30 @@ async def lifespan(app: FastAPI):
     set_loop(_loop)
     print("   HumanLoop: initialized")
 
-    # 4. Redis Worker (如已配置 Redis)
-    # 生产环境: send_callback 应指向 WSS Gateway 的 send_to_hook 方法
-    # 当 WSS Gateway 未启动时，降级为日志打印
+    # 4. WSS Gateway (生产必须开启) — 启动后其 send_to_hook 就是发送回调
+    if settings.wss_enabled:
+        _gateway = WSSGateway(
+            host=settings.wss_host,
+            port=settings.wss_port,
+        )
+        await _gateway.start()
+        print(f"   WSS Gateway: started on ws://{settings.wss_host}:{settings.wss_port}")
+    else:
+        _gateway = None
+        print("   WSS Gateway: ⚠️ 已禁用 (wss_enabled=false)，微信发送链路不可用！")
+
+    # 5. Redis Worker (如已配置 Redis)
+    # 修复: send_callback 指向 WSS Gateway 的 send_to_hook —— 审核采纳后消息真正发到微信 Hook
     if settings.redis_url:
-        async def _default_send(account_id: str, to_user: str, text: str):
-            """默认发送回调 — 生产环境由 WSS Gateway 注入 send_to_hook"""
-            print(f"[Worker::Send] {account_id} → {to_user}: '{text[:60]}...'")
+        if _gateway is not None:
+            send_callback = _gateway.get_send_callback()
+        else:
+            async def send_callback(account_id: str, to_user: str, text: str):
+                print(f"[Worker::Send] ⚠️ WSS Gateway 未启动，仅日志: {account_id} → {to_user}: '{text[:60]}...'")
+                raise RuntimeError("WSS Gateway 未启动，消息未能发送")
 
         _worker_task = _simulator.start_worker(
-            send_callback=_default_send,
+            send_callback=send_callback,
             poll_interval=1.0,
         )
         print(f"   Redis Worker: started (task: {id(_worker_task)})")
@@ -156,6 +189,10 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print("🛑 Shutting down...")
     print("=" * 60)
+
+    if _gateway is not None:
+        await _gateway.stop()
+        print("   WSS Gateway: stopped")
 
     if _simulator:
         await _simulator.stop_worker()
@@ -199,9 +236,19 @@ _rate_store_lock = asyncio.Lock()
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    """简易滑动窗口速率限制"""
-    # 获取客户端 IP
-    client_ip = request.client.host if request.client else "unknown"
+    """
+    简易滑动窗口速率限制。
+
+    修复: 应用位于 Nginx 反代之后时 request.client.host 恒为 127.0.0.1，
+    改用 X-Forwarded-For 首地址取真实客户端 IP（Nginx 已配置 proxy_set_header）。
+    注意: --workers > 1 时每进程独立计数，精确限速仍需依赖 Nginx limit_req。
+    """
+    # 获取客户端 IP: 优先取 X-Forwarded-For 第一个地址（最外层真实 IP）
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        client_ip = xff.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
 
     # 写入端点更严格
     is_write = request.method in ("POST", "PUT", "PATCH", "DELETE")
@@ -250,8 +297,17 @@ app.include_router(human_loop_router)
 # ════════════════════════════════════════════════════════════
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    """前端审核面板 WebSocket 连接"""
+async def websocket_endpoint(ws: WebSocket, token: str = Query("")):
+    """
+    前端审核面板 WebSocket 连接。
+
+    鉴权: settings.api_token 非空时必须携带 ?token=xxx，否则拒绝连接。
+    """
+    if not verify_ws_token(token):
+        print(f"[WS] 🔒 拒绝未授权连接 (token 缺失/无效)")
+        await ws.close(code=1008, reason="unauthorized: invalid token")
+        return
+
     await _ws_manager.connect(ws)
     try:
         while True:
@@ -272,14 +328,67 @@ async def websocket_endpoint(ws: WebSocket):
 # 健康检查
 # ════════════════════════════════════════════════════════════
 
+async def _check_dependency_health() -> dict:
+    """检查各外部依赖连通性（每个 2 秒超时，失败不抛异常）"""
+    deps: dict[str, bool] = {}
+
+    # Redis
+    try:
+        r = _simulator.redis or (await _simulator.init_redis() or _simulator.redis)
+        await asyncio.wait_for(r.ping(), timeout=2.0)
+        deps["redis"] = True
+    except Exception:
+        deps["redis"] = False
+
+    # Qdrant
+    try:
+        q = _brain.qdrant or (await _brain._ensure_qdrant() or _brain.qdrant)
+        await asyncio.wait_for(q.get_collections(), timeout=2.0)
+        deps["qdrant"] = True
+    except Exception:
+        deps["qdrant"] = False
+
+    # MongoDB
+    try:
+        m = _brain.mongo or AsyncIOMotorClient(settings.mongo_uri)
+        await asyncio.wait_for(m.admin.command("ping"), timeout=2.0)
+        deps["mongo"] = True
+    except Exception:
+        deps["mongo"] = False
+
+    # PostgreSQL
+    try:
+        import asyncpg
+        pg = await asyncio.wait_for(
+            asyncpg.connect(dsn=settings.pg_dsn, timeout=2), timeout=3.0
+        )
+        await pg.fetchval("SELECT 1")
+        await pg.close()
+        deps["postgres"] = True
+    except Exception:
+        deps["postgres"] = False
+
+    return deps
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
-    """健康检查端点"""
+    """
+    健康检查端点 — 修复: 实际探测各依赖连通性。
+
+    HTTP 200 保持（部署脚本按 200 判断），status 字段区分:
+      ok      — 全部依赖正常
+      degraded — 部分依赖不可用（deps 中列出明细）
+    """
+    deps = await _check_dependency_health()
+    all_ok = all(deps.values())
     return {
-        "status": "ok",
+        "status": "ok" if all_ok else "degraded",
         "app": settings.app_name,
         "version": settings.app_version,
         "redis_mode": "enabled" if settings.redis_url else "memory",
+        "auth": "enabled" if auth_enabled() else "disabled",
+        "deps": deps,
     }
 
 

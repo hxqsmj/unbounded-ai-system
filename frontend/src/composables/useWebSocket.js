@@ -7,6 +7,7 @@
  */
 
 import { ref, onMounted, onUnmounted } from 'vue'
+import { getToken } from '../api/chat.js'
 
 /**
  * @param {Object} options
@@ -17,7 +18,12 @@ export function useWebSocket(options = {}) {
   const { onNewMessage } = options
 
   const isConnected = ref(false)
-  const wsUrl = `ws://${window.location.host}/ws`
+
+  // 修复: ws/wss 随页面协议自适应（HTTPS 下用 wss，否则被浏览器拦截混合内容）
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const token = getToken()
+  // 鉴权: 连接时携带 API Token（后端 /ws 校验 ?token=）
+  const wsUrl = `${protocol}://${window.location.host}/ws?token=${encodeURIComponent(token)}`
 
   let ws = null
   let reconnectTimer = null

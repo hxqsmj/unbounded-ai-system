@@ -24,7 +24,11 @@ import time
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-import redis.asyncio as aioredis
+# 可选依赖 — lazy import 以支持无 Redis 环境的 Mock 测试
+try:
+    import redis.asyncio as aioredis
+except ImportError:
+    aioredis = None  # type: ignore
 
 from app.core.config import settings
 
@@ -56,14 +60,23 @@ class TypingSimulator:
       - Redis 模式 (redis_url 非空): 适用于生产环境 / 多节点分布式
     """
 
+    # sentinel: 传入 TypingSimulator(redis_url=MEMORY) 强制纯内存模式，
+    # 用于 Mock 测试（settings.redis_url 已配置时默认仍走 Redis 模式）
+    MEMORY = object()
+
     def __init__(self, redis_url: Optional[str] = None):
         """
         Args:
             redis_url: Redis 连接地址。
-                       为 None 时仅启用内存模式；
+                       - 不传/传 None → 默认取 settings.redis_url（.env 配置）
+                       - 显式传 None 无法强制内存模式，请使用 _MEMORY_SENTINEL
+                         (TypingSimulator(redis_url=TypingSimulator.MEMORY))
                        例如 "redis://localhost:6379/0" 时启用 Redis 持久化。
         """
-        self.redis_url = redis_url or settings.redis_url
+        if redis_url is TypingSimulator.MEMORY:
+            self.redis_url = None  # 强制纯内存模式（Mock 测试用）
+        else:
+            self.redis_url = redis_url or settings.redis_url
         self.redis: Optional[aioredis.Redis] = None
         self.queue_key = settings.redis_queue_key
         self._worker_task: Optional[asyncio.Task] = None
@@ -73,6 +86,10 @@ class TypingSimulator:
     async def init_redis(self) -> None:
         """惰性初始化 Redis 连接（连接池复用）"""
         if self.redis_url and not self.redis:
+            if aioredis is None:
+                raise RuntimeError(
+                    "redis 库未安装，无法使用 Redis 模式。请执行: pip install redis"
+                )
             self.redis = aioredis.from_url(
                 self.redis_url,
                 decode_responses=True,
@@ -103,6 +120,20 @@ class TypingSimulator:
             current_hour >= settings.sleep_start_hour
             or current_hour < settings.sleep_end_hour
         )
+
+    def _seconds_until_sleep_end(self) -> float:
+        """
+        计算距离休眠窗口结束 (sleep_end_hour:00) 的秒数。
+
+        用于 Worker 在休眠期间挂起，避免半夜发送已排队消息。
+        """
+        now = datetime.now()
+        end = now.replace(
+            hour=settings.sleep_end_hour, minute=0, second=0, microsecond=0
+        )
+        if end <= now:
+            end = end.replace(day=end.day + 1)  # 跨天（如休眠到次日 07:00）
+        return max(0.0, (end - now).total_seconds())
 
     def calculate_delay(self, text: str) -> float:
         """
@@ -277,6 +308,17 @@ class TypingSimulator:
         )
 
         while True:
+            # 夜间休眠拦截: 休眠窗口内不消费任何消息，睡到休眠结束
+            # 与入队侧 (enqueue_message_redis) 的检查保持一致，防止半夜发送
+            if self.is_sleep_time():
+                wait = self._seconds_until_sleep_end()
+                print(
+                    f"[DelayEngine-Worker] 🌙 夜间休眠窗口，暂停消费 "
+                    f"{wait / 3600:.1f} 小时 (到 {settings.sleep_end_hour}:00)"
+                )
+                await asyncio.sleep(min(wait, 600))  # 最多睡 10 分钟醒来复查
+                continue
+
             try:
                 now = time.time()
 
@@ -299,9 +341,16 @@ class TypingSimulator:
                         f"Queued at: {datetime.fromtimestamp(data['queued_at'])}"
                     )
 
-                    # 异步回调发送，不阻塞轮询循环
+                    # 异步回调发送（含失败重试），不阻塞轮询循环
                     asyncio.create_task(
-                        send_callback(data["account_id"], data["to_user"], data["text"])
+                        self._deliver_with_retry(
+                            send_callback=send_callback,
+                            account_id=data["account_id"],
+                            to_user=data["to_user"],
+                            text=data["text"],
+                            payload_str=payload_str,
+                            retry_count=data.get("retry_count", 0),
+                        )
                     )
 
             except asyncio.CancelledError:
@@ -311,6 +360,47 @@ class TypingSimulator:
                 print(f"[DelayEngine-Worker] ⚠️ Error: {type(e).__name__}: {e}")
 
             await asyncio.sleep(poll_interval)
+
+    async def _deliver_with_retry(
+        self,
+        send_callback: Callable[[str, str, str], Awaitable[None]],
+        account_id: str,
+        to_user: str,
+        text: str,
+        payload_str: str,
+        retry_count: int = 0,
+    ) -> None:
+        """
+        发送回调并处理失败重试。
+
+        发送失败时重新入队（score = now + retry_delay），重试次数达到上限后
+        打印告警并丢弃（消息已从原队列移除，避免丢失无感知）。
+        """
+        try:
+            await send_callback(account_id, to_user, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            retry_count += 1
+            if retry_count <= settings.redis_send_max_retries:
+                print(
+                    f"[DelayEngine-Worker] ⚠️ 发送失败 (第 {retry_count}/{settings.redis_send_max_retries} 次重试): "
+                    f"{type(e).__name__}: {e} | Trace 将重新入队"
+                )
+                try:
+                    data = json.loads(payload_str)
+                    data["retry_count"] = retry_count
+                    await self.redis.zadd(
+                        self.queue_key,
+                        {json.dumps(data, ensure_ascii=False): time.time() + settings.redis_send_retry_delay},
+                    )
+                except Exception as re_e:
+                    print(f"[DelayEngine-Worker] ❌ 重试入队失败: {re_e}")
+            else:
+                print(
+                    f"[DelayEngine-Worker] ❌ 发送失败且超过最大重试次数 "
+                    f"({settings.redis_send_max_retries})，消息已丢弃: {type(e).__name__}: {e}"
+                )
 
     # ── Worker 生命周期管理 ─────────────────────────────────
 

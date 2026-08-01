@@ -29,17 +29,30 @@ sudo ufw allow 22/tcp comment 'SSH'
 sudo ufw allow 80/tcp comment 'HTTP (Nginx)'
 
 # ── 数据库端口仅 localhost (不对外开放) ─────────────────────
-# 这些不需要 ufw 规则，因为 Docker 默认绑定到 127.0.0.1
-# 但如果 docker-compose ports 写的是 "5432:5432"，则需要检查
+# 修复: 直接修改 docker-compose.yml 将端口绑定到 127.0.0.1，
+# 不再只打印提示（此前提示后从不执行，数据库端口实际对公网开放）
 echo -e "${YELLOW}[3/4] 数据库端口安全检查...${NC}"
-echo "  ✓ PostgreSQL (5432) - 仅 localhost"
-echo "  ✓ MongoDB (27017)   - 仅 localhost"
-echo "  ✓ Qdrant (6333)     - 仅 localhost"
-echo "  ✓ Redis (6379)      - 仅 localhost"
-echo ""
-echo "  ⚠ 如果 docker-compose.yml 中 ports 未绑定 127.0.0.1"
-echo "    请将其改为: 127.0.0.1:5432:5432 等"
-echo "    否则端口会对公网开放!"
+COMPOSE_FILE="$(dirname "$0")/../docker-compose.yml"
+if [ -f "$COMPOSE_FILE" ]; then
+    echo "  检查 $COMPOSE_FILE 端口绑定..."
+    for port in 6333 6334 27017 5432 6379; do
+        # 匹配形如 "6333:6333" 的裸绑定（未加 127.0.0.1 前缀）
+        if grep -Eq "\"$port:$port\"" "$COMPOSE_FILE"; then
+            echo "  🔧 端口 $port 未绑定 127.0.0.1，正在修正..."
+            sed -i "s|\"$port:$port\"|\"127.0.0.1:$port:$port\"|g" "$COMPOSE_FILE"
+            echo "  ✓ 已修正: 127.0.0.1:$port:$port"
+        fi
+    done
+    echo ""
+    echo "  ✓ PostgreSQL (5432) - 仅 localhost"
+    echo "  ✓ MongoDB (27017)   - 仅 localhost"
+    echo "  ✓ Qdrant (6333)     - 仅 localhost"
+    echo "  ✓ Redis (6379)      - 仅 localhost"
+    echo ""
+    echo "  ⚠ 修改后请执行: docker compose up -d 重新创建容器使端口绑定生效"
+else
+    echo "  ⚠ 未找到 docker-compose.yml，跳过端口绑定修正"
+fi
 echo ""
 
 # ── 启用防火墙 ─────────────────────────────────────────────

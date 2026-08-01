@@ -129,17 +129,36 @@ echo -e "${YELLOW}初始化 PostgreSQL 数据表...${NC}"
 PG_USER=$(grep '^PG_USER=' .env 2>/dev/null | cut -d= -f2 || echo "geop")
 PG_DB=$(grep '^PG_DB=' .env 2>/dev/null | cut -d= -f2 || echo "unbounded_ai")
 
+# ⚠ 表结构与 app/services/human_loop.py 的建表语句保持一致！
+#   之前版本列名不一致 (original_question/ai_reply...) 导致数据飞轮静默写入失败
 docker exec unbounded_postgres psql -U "${PG_USER}" -d "${PG_DB}" -c "
 CREATE TABLE IF NOT EXISTS rag_feedback (
     id SERIAL PRIMARY KEY,
     trace_id VARCHAR(64) UNIQUE NOT NULL,
-    original_question TEXT NOT NULL,
-    ai_reply TEXT NOT NULL,
-    action VARCHAR(16) NOT NULL CHECK (action IN ('ACCEPT', 'MODIFY', 'REJECT')),
-    modified_reply TEXT,
-    reviewer_note TEXT,
+    context_text TEXT NOT NULL,
+    ai_raw_output TEXT NOT NULL,
+    human_edited_output TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT NOW()
 );" 2>/dev/null && echo "   PostgreSQL: rag_feedback ✓" || echo "   ⚠ 表初始化跳过（可能已存在）"
+
+# 兼容旧表: 若服务器上存在旧结构的 rag_feedback 表，先删除重建（数据为反馈样本，无业务价值）
+OLD_COLS=$(docker exec unbounded_postgres psql -U "${PG_USER}" -d "${PG_DB}" -tAc \
+  "SELECT count(*) FROM information_schema.columns WHERE table_name='rag_feedback' AND column_name='original_question';" 2>/dev/null || echo "0")
+if [ "$OLD_COLS" = "1" ]; then
+    echo -e "${YELLOW}   检测到旧版 rag_feedback 表结构，删除重建以匹配新结构...${NC}"
+    docker exec unbounded_postgres psql -U "${PG_USER}" -d "${PG_DB}" -c "DROP TABLE rag_feedback;"
+    docker exec unbounded_postgres psql -U "${PG_USER}" -d "${PG_DB}" -c "
+CREATE TABLE IF NOT EXISTS rag_feedback (
+    id SERIAL PRIMARY KEY,
+    trace_id VARCHAR(64) UNIQUE NOT NULL,
+    context_text TEXT NOT NULL,
+    ai_raw_output TEXT NOT NULL,
+    human_edited_output TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING',
+    created_at TIMESTAMP DEFAULT NOW()
+);" && echo "   PostgreSQL: rag_feedback 已重建 ✓"
+fi
 
 # ── 9. 导入知识库 ────────────────────────────────────────
 echo ""

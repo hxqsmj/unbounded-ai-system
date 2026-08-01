@@ -6,11 +6,49 @@
 
 import axios from 'axios'
 
+export const TOKEN_KEY = 'wujie_api_token'
+export const OPERATOR_KEY = 'wujie_operator_name'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setAuth(token, operatorName) {
+  localStorage.setItem(TOKEN_KEY, token)
+  localStorage.setItem(OPERATOR_KEY, operatorName)
+}
+
+export function clearAuth() {
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(OPERATOR_KEY)
+}
+
 const http = axios.create({
   baseURL: '/api/v1/chat',
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
 })
+
+// 请求拦截: 自动携带 API Token
+http.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) config.headers['X-API-Token'] = token
+  return config
+})
+
+// 响应拦截: 401 → 清除本地凭证并刷新页面（回到登录界面）
+http.interceptors.response.use(
+  (resp) => resp,
+  (error) => {
+    if (error.response?.status === 401) {
+      clearAuth()
+      if (!window.location.hash.includes('auth')) {
+        window.location.reload()
+      }
+    }
+    return Promise.reject(error)
+  }
+)
 
 // ═══════════════════════════════════════════════
 // 待审核队列

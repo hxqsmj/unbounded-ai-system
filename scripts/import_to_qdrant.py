@@ -368,11 +368,26 @@ async def import_to_qdrant(
     print(f"[Embedding] 向量化完成: {len(vectors)} 条, 维度={len(vectors[0])}")
 
     # ── Step 5: 批量写入 Qdrant ─────────────────────────────
+    # 修复: 过滤零向量（Embedding 失败时降级产物），避免写入 Qdrant 污染集合
     write_batch_size = 100  # Qdrant 写入批大小
     points_batch: List[qdrant_models.PointStruct] = []
     success_count = 0
+    skipped_zero_vector = 0
 
     for idx, (record, vector) in enumerate(zip(records, vectors)):
+        # 零向量检测: 全 0 或接近 0 的向量（Embedding API 失败/超时的兜底产物）
+        try:
+            is_zero = all(abs(v) < 1e-12 for v in vector) if vector else True
+        except Exception:
+            is_zero = True
+        if is_zero or not vector:
+            skipped_zero_vector += 1
+            print(
+                f"  [Qdrant] ⚠️ 跳过零向量记录 (idx={idx}): "
+                f"'{record['text'][:30]}...' — Embedding 失败，不写入集合"
+            )
+            continue
+
         # 基于内容生成确定性 UUID（幂等去重）
         point_id = generate_deterministic_uuid(record["text"])
 
@@ -408,6 +423,14 @@ async def import_to_qdrant(
                 points_batch.clear()
 
     qdrant.close()
+
+    if skipped_zero_vector > 0:
+        print(
+            f"  [Qdrant] ⚠️ 完成: 成功写入 {success_count} 条，"
+            f"跳过零向量 {skipped_zero_vector} 条（Embedding 失败，请检查 Embedding API 配置）"
+        )
+    else:
+        print(f"  [Qdrant] ✅ 完成: 成功写入 {success_count} 条，无零向量跳过")
     return (success_count, len(records))
 
 

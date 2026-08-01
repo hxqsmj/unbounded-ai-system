@@ -18,14 +18,14 @@ const submitResult = ref(null)
 const showRagContext = ref(false)
 const editorRef = ref(null)
 
-// ── 快捷话术 (localStorage 持久化) ────────
+// ── 快捷话术 (localStorage 持久化) — 地坪销售专属模板 ──
 const STORAGE_KEY = 'wujie_quick_phrases'
 const defaultPhrases = [
   { label: '💬 加上礼貌用语', append: '，感谢您的咨询，如有其他问题随时联系我！' },
-  { label: '💰 补充价格说明', append: '\n\n温馨提示：以上价格为当前促销价，具体以结算页面为准。' },
-  { label: '📞 预约电话回访', append: '\n\n如需进一步了解，我可以安排专人在工作时间给您回电。请确认您的联系方式。' },
-  { label: '📦 补充物流信息', append: '，物流时效一般为1-3个工作日，偏远地区可能稍有延迟。' },
-  { label: '🛡️ 补充售后说明', append: '，我们提供7天无理由退货和30天换货服务。' },
+  { label: '💰 补充报价说明', append: '\n\n具体报价需要根据现场基层情况（平整度、厚度、面积）来核算，咱们提供免费上门勘测，技术员看完现场给您出详细方案和报价清单。' },
+  { label: '📞 预约上门勘测', append: '\n\n我安排技术员免费上门勘测、带样打样，您看这周什么时间方便？也可以直接拨18606859158预约。' },
+  { label: '⏱️ 补充施工工期', append: '，环氧地坪施工工期一般为3-5天，具体视面积和基层条件而定，工期和质保都会写进合同。' },
+  { label: '🛡️ 补充质保说明', append: '，咱们嘉兴晨邦包工包料一站式服务，环氧地坪质保期一般2-3年，后期有养护指导，售后有保障。' },
 ]
 
 const quickPhrases = ref(loadPhrases())
@@ -109,10 +109,11 @@ async function doAction(action) {
     if (action === 'REJECT') playReject()
     else playSuccess()
 
-    // 记录操作日志
+    // 记录操作日志 (operator 取自登录时的操作员名称，不再硬编码 'admin')
     recordOperation({
       trace_id: detail.value.trace_id,
-      action, operator: 'admin',
+      action,
+      operator: localStorage.getItem('wujie_operator_name') || '操作员',
       detail: detail.value.user_input?.substring(0, 50) || '',
     }).catch(() => {})
 

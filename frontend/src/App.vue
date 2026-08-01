@@ -5,7 +5,38 @@ import AuditPanel from './components/AuditPanel.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useKeyboard } from './composables/useKeyboard'
 import { playDing } from './composables/useAudio'
-import { fetchPendingQueue, fetchDashboard, fetchOperationLogs } from './api/chat.js'
+import { fetchPendingQueue, fetchDashboard, fetchOperationLogs, getToken, setAuth } from './api/chat.js'
+
+// ── 登录状态 (Token 鉴权) ────────────────────
+const isAuthed = ref(!!getToken())
+const loginToken = ref('')
+const loginOperator = ref(localStorage.getItem('wujie_operator_name') || '')
+const loginError = ref('')
+const loginLoading = ref(false)
+
+function doLogin() {
+  if (!loginToken.value.trim()) {
+    loginError.value = '请输入 API Token'
+    return
+  }
+  loginLoading.value = true
+  loginError.value = ''
+  // 用 /pending 验证 token 有效性
+  fetchPendingQueue({ limit: 1 })
+    .then(() => {
+      setAuth(loginToken.value.trim(), loginOperator.value.trim() || '操作员')
+      window.location.reload() // 刷新以建立带 token 的 WebSocket
+    })
+    .catch((e) => {
+      loginError.value = (e.response?.status === 401) ? 'Token 无效，请检查后重试' : '无法连接服务器，请检查网络'
+    })
+    .finally(() => { loginLoading.value = false })
+}
+
+function doLogout() {
+  localStorage.removeItem('wujie_api_token')
+  window.location.reload()
+}
 
 // ── 暗黑模式 ────────────────────────────────
 const isDark = ref(localStorage.getItem('theme') === 'dark')
@@ -190,11 +221,60 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
 })
 
-import { Search, Moon, Sunny } from '@element-plus/icons-vue'
+import { Search, Moon, Sunny, SwitchButton } from '@element-plus/icons-vue'
 </script>
 
 <template>
   <div class="flex flex-col h-screen w-screen overflow-hidden" :class="{ dark: isDark }">
+
+    <!-- ═══════════════ 登录界面 (Token 鉴权) ═══════════════ -->
+    <div v-if="!isAuthed" class="fixed inset-0 z-50 flex items-center justify-center"
+      style="background: var(--bg-app);">
+      <div class="w-[380px] p-8 rounded-2xl border shadow-xl"
+        style="background: var(--bg-surface); border-color: var(--border);">
+        <div class="flex flex-col items-center gap-3 mb-6">
+          <div class="w-14 h-14 rounded-xl flex items-center justify-center"
+            style="background: linear-gradient(135deg, #5b5cff, #8b5cf6);">
+            <span class="text-white text-xl font-bold">无</span>
+          </div>
+          <h1 class="text-base font-semibold" style="color: var(--text-primary);">无界AI 审核工作台</h1>
+          <p class="text-[11px]" style="color: var(--text-tertiary);">请输入访问凭证以登录</p>
+        </div>
+
+        <div class="space-y-3">
+          <el-input
+            v-model="loginOperator"
+            placeholder="操作员名称 (可选)"
+            size="large"
+            clearable
+          />
+          <el-input
+            v-model="loginToken"
+            placeholder="API Token"
+            size="large"
+            show-password
+            @keyup.enter="doLogin"
+          />
+          <el-button
+            type="primary"
+            size="large"
+            class="w-full"
+            :loading="loginLoading"
+            @click="doLogin"
+            style="background: linear-gradient(135deg, #5b5cff, #6366f1); border-color: transparent;"
+          >
+            登 录
+          </el-button>
+          <p v-if="loginError" class="text-[12px] text-center" style="color: var(--red);">{{ loginError }}</p>
+          <p class="text-[10px] leading-relaxed" style="color: var(--text-tertiary);">
+            Token 由系统管理员在服务器 .env 的 API_TOKEN 中配置
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ 主界面 ═══════════════ -->
+    <template v-else>
 
     <!-- ═══════════════ 顶部全局控制栏 ═══════════════ -->
     <header class="flex-shrink-0 px-6 py-3 border-b flex items-center justify-between"
@@ -273,6 +353,15 @@ import { Search, Moon, Sunny } from '@element-plus/icons-vue'
           @click="toggleTheme"
           style="background: var(--bg-hover); border-color: var(--border); color: var(--text-secondary);"
         />
+        <el-button
+          size="small"
+          circle
+          title="退出登录"
+          @click="doLogout"
+          style="background: var(--bg-hover); border-color: var(--border); color: var(--text-secondary);"
+        >
+          <el-icon><SwitchButton /></el-icon>
+        </el-button>
       </div>
     </header>
 
@@ -369,6 +458,7 @@ import { Search, Moon, Sunny } from '@element-plus/icons-vue'
         </div>
       </div>
     </div>
+    </template>
   </div>
 </template>
 

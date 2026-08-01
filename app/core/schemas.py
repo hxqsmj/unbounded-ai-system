@@ -8,7 +8,7 @@
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -58,16 +58,17 @@ class RAGFeedbackModel(BaseModel):
 
 class ChatMessage(BaseModel):
     """单条对话消息"""
-    role: str = Field(..., description="角色: user / assistant")
-    content: str = Field(..., description="消息内容")
+    # 只允许 user/assistant，禁止客户端伪造 role:"system" 覆盖系统提示词（提示注入防护）
+    role: Literal["user", "assistant"] = Field(..., description="角色: 仅允许 user / assistant")
+    content: str = Field(..., max_length=2000, description="消息内容")
 
 
 class ChatGenerateRequest(BaseModel):
     """POST /api/v1/chat/generate 请求体"""
-    account_id: str = Field(..., description="操作账号ID")
-    customer_id: str = Field(..., description="客户ID")
-    user_message: str = Field(..., min_length=1, description="用户消息")
-    history: List[ChatMessage] = Field(default_factory=list, description="历史对话记录")
+    account_id: str = Field(..., min_length=1, max_length=64, description="操作账号ID")
+    customer_id: str = Field(..., min_length=1, max_length=64, description="客户ID")
+    user_message: str = Field(..., min_length=1, max_length=2000, description="用户消息")
+    history: List[ChatMessage] = Field(default_factory=list, max_length=50, description="历史对话记录")
 
 
 class ChatGenerateResponse(BaseModel):
@@ -81,10 +82,10 @@ class ChatGenerateResponse(BaseModel):
 
 class ConfirmSendRequest(BaseModel):
     """POST /api/v1/chat/confirm_send 请求体"""
-    trace_id: str = Field(..., description="追溯ID")
-    final_text: str = Field(..., description="最终发送文本")
+    trace_id: str = Field(..., min_length=1, max_length=64, description="追溯ID")
+    final_text: str = Field(..., max_length=2000, description="最终发送文本")
     is_modified: bool = Field(default=False, description="是否经过人工修改")
-    action: str = Field(..., description="操作: ACCEPT / REJECT / MODIFY")
+    action: Literal["ACCEPT", "MODIFY", "REJECT"] = Field(..., description="操作: ACCEPT / REJECT / MODIFY")
 
 
 class ConfirmSendResponse(BaseModel):

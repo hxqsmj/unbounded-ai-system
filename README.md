@@ -8,12 +8,12 @@
 
 ```
 [微信 Hook 客户端] ──WSS──▶ [Ngrok 穿透] ──TCP──▶ [WSS Gateway :8765] ──HTTP──▶ [FastAPI 后端 :8001]
-   (Windows 微信)            0.tcp.ngrok.io:XXXX         (V4.0 双向网关)              (AI Brain 引擎)
+   (Windows 微信)            0.tcp.ngrok.io:XXXX         (随 FastAPI 集成启动)         (AI Brain 引擎)
                                                                                        │
          ┌─────────────────────────────────────────────────────────────────────────────┤
          │                                                                             │
          ▼ (Qdrant :6333)                                                    ▼ (Vue3 面板 :5173)
-  [71条晨邦地坪 FAQ]                                                  [人机协作审核工作台]
+  [84条晨邦地坪 FAQ]                                                  [人机协作审核工作台]
   (BGE-M3 1024维向量)                                             (ACCEPT / MODIFY / REJECT)
                                                                               │
                                                                               ▼
@@ -23,8 +23,13 @@
                                                                    ┌──────────┴──────────┐
                                                                    ▼                     ▼
                                                             [指令回传 Hook 发送]   [PostgreSQL 落盘]
-                                                                                   (rag_feedback 飞轮)
+                                                          (Worker→Gateway→Hook)   (rag_feedback 飞轮)
 ```
+
+> 🔒 **鉴权**: 设置 `.env` 中 `API_TOKEN` 后，所有 `/api/v1/*` 接口、前端
+> WebSocket (`/ws`)、微信 Hook 连接 (`/ws/hook/{account_id}`) 均需携带
+> Token（请求头 `X-API-Token` / `Authorization: Bearer`，WSS 用 `?token=` 查询参数）。
+> 生产环境必须设置，否则系统处于无鉴权状态（启动时会有红色警告）。
 
 ---
 
@@ -59,13 +64,16 @@
 │   └── vite.config.js                  # Vite 代理配置
 │
 ├── scripts/                            # 运维与测试脚本集
-│   ├── start_gateway.py                # WSS 网关一键启动
+│   ├── start_gateway.py                # WSS 网关独立调试启动（生产已集成进 FastAPI）
 │   ├── import_to_qdrant.py             # FAQ 语料灌入 Qdrant
 │   ├── verify_qdrant.py                # RAG 检索验证
 │   ├── mock_hook_client.py             # 微信消息推送模拟器
 │   ├── e2e_full_chain.py               # 5 阶段全链路自动化测试
 │   ├── final_test.py                   # P1 最终验收脚本
-│   └── verify_pg_flywheel.py           # PG 数据飞轮验证
+│   ├── verify_pg_flywheel.py           # PG 数据飞轮验证
+│   ├── wechat_bridge.py                # 微信 Hook 客户端（WSS 推送）
+│   ├── wechat_ui_bridge.py             # 微信桌面端 UI 自动化桥接（键鼠模拟）
+│   └── _test_wechat.py                 # 微信桥接调试脚本
 │
 ├── tests/                              # 单元测试
 │   ├── test_all.py                     # 16 项 Mock 全模块验证
@@ -77,6 +85,7 @@
 │   └── HOOK_SETUP.md                   # 微信 Hook 客户端对接指南
 ├── data/
 │   ├── real_sales_faq.csv              # 51 条嘉兴晨邦专属地坪 FAQ
+│   ├── real_sales_faq_v2.csv           # 33 条通用地坪 FAQ（合计 84 条）
 │   └── sales_knowledge.csv             # 原始销售知识库
 ├── .env                                # 环境变量 (API Key / 数据库)
 ├── .env.example                        # 环境变量模板
@@ -129,22 +138,23 @@ docker compose up -d
 ### 4. 导入知识库
 
 ```bash
-python scripts/import_to_qdrant.py data/real_sales_faq.csv
-# 51 条晨邦 FAQ → 1024 维向量 → Qdrant
+python scripts/import_to_qdrant.py data/real_sales_faq.csv      # 51 条晨邦 FAQ
+python scripts/import_to_qdrant.py data/real_sales_faq_v2.csv   # 33 条通用 FAQ（合计 84 条）
+# → 1024 维向量 → Qdrant（零向量自动过滤）
 ```
 
-### 5. 启动服务 (三个终端)
+### 5. 启动服务
 
 ```bash
-# 终端 1 — FastAPI 后端
+# 终端 1 — FastAPI 后端（WSS Gateway 已随进程集成启动，含发送链路注入）
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 
-# 终端 2 — WSS Gateway
-python scripts/start_gateway.py --host 0.0.0.0 --port 8765
-
-# 终端 3 — Vue3 前端
+# 终端 2 — Vue3 前端
 cd frontend && npm run dev
 ```
+
+> ⚠ WSS Gateway 生产环境由 `app/main.py` 在 lifespan 中自动启动
+> （`WSS_ENABLED=true`），无需单独运行 `scripts/start_gateway.py`（该脚本仅用于独立调试）。
 
 ### 6. 一键测试
 
@@ -198,7 +208,7 @@ python scripts/final_test.py --host 0.tcp.ngrok.io --port XXXXX
 
 | 指标 | 数值 |
 |------|------|
-| 知识库容量 | **71 条** (51晨邦 + 20 通用) |
+| 知识库容量 | **84 条** (51 晨邦 + 33 通用) |
 | 向量模型 | BGE-M3 (1024 维) |
 | 平均检索置信度 | **0.845** |
 | LLM 模型 | DeepSeek-Chat |

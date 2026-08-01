@@ -213,15 +213,21 @@ async def test_task2_ai_brain():
 async def test_task3_human_loop():
     """Task 3: Human-in-the-Loop API 测试 (Mock 模式)"""
     from app.services.human_loop import HumanLoop, set_loop
+    from app.services.typing_simulator import TypingSimulator
     from app.core.schemas import ConfirmSendRequest
 
     print("\n📦 Task 3: Human-in-the-Loop 人机协作 API")
     print("-" * 40)
 
     class MockLoop(HumanLoop):
+        def __init__(self):
+            # 强制内存模式: 测试不依赖 Redis 库/服务
+            super().__init__(typing_simulator=TypingSimulator(redis_url=TypingSimulator.MEMORY))
+
         async def _ensure_mongo(self): pass
         async def _ensure_pg(self): pass
         async def _write_feedback(self, *a, **kw): pass
+        def is_sleep_time(self): return False  # 测试忽略夜间休眠窗口
 
     loop = MockLoop()
     set_loop(loop)
@@ -234,10 +240,11 @@ async def test_task3_human_loop():
             "customer_id": "cust_001",
             "retrieved_docs": "doc content",
             "llm_raw_output": "AI generated text",
+            "status": "PENDING",
         }
 
     async def mock_update_one(*a, **kw):
-        return None
+        return type("UpdateResult", (), {"matched_count": 1})()
 
     loop._trace_collection = type("MockCol", (), {
         "find_one": mock_find_one,
@@ -395,7 +402,8 @@ async def test_task4_wss_gateway():
         ]
         kw_passed = 0
         for content, expected in kw_checks:
-            actual = gateway._is_system_message("ON_RECV_MSG", content)
+            # 修复: 函数签名是 _is_system_message(content)，之前多传了事件名参数必抛 TypeError
+            actual = gateway._is_system_message(content)
             if actual == expected:
                 kw_passed += 1
         assert kw_passed == len(kw_checks)

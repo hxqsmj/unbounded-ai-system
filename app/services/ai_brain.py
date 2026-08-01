@@ -15,12 +15,13 @@ Task 2: AI 智脑与 RAG 检索链路 (AI Brain V3.0)
   - httpx>=0.24.0
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 # 可选依赖 — lazy import 以支持 Mock 测试
 try:
@@ -200,9 +201,13 @@ class AIBrain:
         """
         messages = [{"role": "system", "content": system_prompt}]
 
-        # 注入历史对话
+        # 注入历史对话 — 防御性过滤: 只允许 user/assistant
+        # (schema 层已限制 Literal["user","assistant"]，此处双保险防提示注入)
         if history:
             for msg in history:
+                if msg.role not in ("user", "assistant"):
+                    print(f"[AIBrain] ⚠️ 丢弃非法历史消息 role={msg.role!r} (提示注入防护)")
+                    continue
                 messages.append({"role": msg.role, "content": msg.content})
 
         messages.append({"role": "user", "content": user_message})
@@ -366,7 +371,14 @@ class AIBrain:
 # FastAPI 路由
 # ════════════════════════════════════════════════════════════
 
-ai_brain_router = APIRouter(prefix="/api/v1/chat", tags=["AI Brain"])
+# 鉴权: 整个 /api/v1/chat 路由组统一校验 API Token
+from app.core.security import verify_api_token
+
+ai_brain_router = APIRouter(
+    prefix="/api/v1/chat",
+    tags=["AI Brain"],
+    dependencies=[Depends(verify_api_token)],
+)
 
 # 全局 AIBrain 实例 (由 main.py 在 startup 时注入)
 _brain_instance: Optional[AIBrain] = None
@@ -414,10 +426,11 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
         background_tasks=background_tasks,
     )
     # 非阻塞通知前端审核面板
+    # 修复: 回调可能为同步函数（main.py 注入的 lambda），create_task 需要协程，
+    # 统一先调用再判断返回值，同步返回值直接丢弃、协程才 create_task
     if _on_generated_callback:
         try:
-            import asyncio
-            asyncio.create_task(_on_generated_callback({
+            cb_result = _on_generated_callback({
                 "trace_id": result.trace_id,
                 "account_id": request.account_id,
                 "customer_id": request.customer_id,
@@ -426,7 +439,9 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
                 "max_score": result.max_score,
                 "is_fallback": result.is_fallback,
                 "status": result.status,
-            }))
+            })
+            if asyncio.iscoroutine(cb_result):
+                asyncio.create_task(cb_result)
         except Exception:
             pass
     return result

@@ -109,10 +109,21 @@ class Settings(BaseSettings):
     wss_port: int = 8765
     wss_heartbeat_interval: int = 30    # 心跳间隔（秒）
     wss_max_missed_pongs: int = 3       # 连续丢失 Pong 触发告警
+    wss_enabled: bool = True            # 是否随 FastAPI 进程启动 WSS 网关（生产必须开启）
+    wss_buffer_max: int = 1000          # Hook 离线时单账号消息缓冲上限（防止无限增长）
 
     # ── API 服务器 ─────────────────────────────────────────
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
+
+    # ── API 鉴权 ───────────────────────────────────────────
+    # 设置后所有 /api/v1 接口与 WebSocket 连接必须携带该 token
+    # ⚠ 为空时系统无鉴权（仅限本地开发），生产环境必须设置！
+    api_token: str = ""
+
+    # ── Redis 发送重试 ─────────────────────────────────────
+    redis_send_max_retries: int = 3     # 发送失败最大重试次数
+    redis_send_retry_delay: int = 60    # 重试间隔（秒）
 
     model_config = {
         "env_file": ".env",

@@ -1,13 +1,19 @@
 """
-WSS Gateway 一键启动脚本 (V4.0)
+WSS Gateway 一键启动脚本 (V4.1)
+
+⚠ 注意: 生产环境网关已集成在 FastAPI 进程内（main.py 随应用启动，
+发送回调由 main.py 自动注入 Redis Worker）。
+本脚本仅用于**独立调试**网关（消息过滤/心跳/缓冲），
+独立模式没有后端发送通道，审核采纳的消息不会真正发出。
 
 用法:
   python scripts/start_gateway.py
   python scripts/start_gateway.py --host 0.0.0.0 --port 8765
 
 启动后:
-  - Hook 客户端接入: ws://{host}:{port}/ws/hook/{account_id}
-  - 前端面板接入:   ws://{host}:{port}/ws
+  - Hook 客户端接入: ws://{host}:{port}/ws/hook/{account_id}?token=xxx
+  - 前端面板接入:   ws://{host}:{port}/ws?token=xxx
+  （API_TOKEN 配置后连接必须携带 token，否则被拒绝）
 """
 
 import asyncio
