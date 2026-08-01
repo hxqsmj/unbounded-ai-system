@@ -47,8 +47,11 @@ def _token_matches(provided: str) -> bool:
         return True  # 未配置 token 时放行（仅限开发）
     if not provided:
         return False
-    provided = _normalize_token(provided)
-    return hmac.compare_digest(provided.encode(), settings.api_token.encode())
+    # 宽容处理: 全角转半角 + 去空格 + 大小写不敏感
+    # (手机端中文输入法/自动大写/粘贴带空格都能登录, 避免"Token 无效"困扰)
+    provided = _normalize_token(provided).lower()
+    expected = _normalize_token(settings.api_token).lower()
+    return hmac.compare_digest(provided.encode(), expected.encode())
 
 
 def verify_api_token(
