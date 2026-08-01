@@ -342,12 +342,15 @@ class UIBridge:
                 # ── 消息读取 ──────────────────────────────
                 poll_count += 1
                 if poll_count % read_interval == 0:
-                    # 只在有未读标记时读取
-                    has_unread = self.wechat.check_unread()
+                    # 修复: 微信 4.x 窗口标题不带未读计数 (标题恒为"微信"),
+                    # check_unread() 永远 False 导致不读消息 → 始终轮询读取
+                    # 安全性: read_current_chat 有 _msg_hashes 去重, 已读消息不会重复推送
+                    has_unread = self.wechat.check_unread()  # 3.x 标题带计数时仍可加速判断
                     if self.debug:
                         log("I", f"轮询 #{poll_count} | 标题=\"{self.wechat.get_title()}\" | 未读={has_unread}")
 
-                    if has_unread or self.debug:
+                    # 微信 4.x: 标题无未读计数, 始终读取当前聊天窗口
+                    if has_unread or self.debug or True:
                         # 读取当前聊天
                         text = self.wechat.read_current_chat()
                         if text and len(text) > 1:
