@@ -30,7 +30,10 @@ const http = axios.create({
 })
 
 // 请求拦截: 自动携带 API Token
+// (已显式指定 X-API-Token 的请求不覆盖 — 登录验证必须用用户输入的 token,
+//  而不是 localStorage 里的旧值, 否则换 token 后永远 401)
 http.interceptors.request.use((config) => {
+  if (config.headers['X-API-Token']) return config
   const token = getToken()
   if (token) config.headers['X-API-Token'] = token
   return config

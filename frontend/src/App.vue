@@ -5,7 +5,7 @@ import AuditPanel from './components/AuditPanel.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useKeyboard } from './composables/useKeyboard'
 import { playDing } from './composables/useAudio'
-import { fetchPendingQueue, fetchDashboard, fetchOperationLogs, getToken, setAuth } from './api/chat.js'
+import { fetchPendingQueue, fetchDashboard, fetchOperationLogs, getToken, setAuth, default as http } from './api/chat.js'
 
 // ── 登录状态 (Token 鉴权) ────────────────────
 const isAuthed = ref(!!getToken())
@@ -37,8 +37,12 @@ function doLogin() {
   }
   loginLoading.value = true
   loginError.value = ''
-  // 用 /pending 验证 token 有效性
-  fetchPendingQueue({ limit: 1 })
+  // 用 /pending 验证 token 有效性 — 必须显式带用户输入的 token
+  // (不走 axios 拦截器的 localStorage, 否则换 token 后旧值导致永远 401)
+  http.get('/pending', {
+    params: { limit: 1 },
+    headers: { 'X-API-Token': loginToken.value.trim() },
+  })
     .then(() => {
       setAuth(loginToken.value.trim(), loginOperator.value.trim() || '操作员')
       window.location.reload() // 刷新以建立带 token 的 WebSocket
