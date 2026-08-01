@@ -251,9 +251,10 @@ class WeChatOperator:
 # ═══════════════════════════════════════════════════════════
 
 class UIBridge:
-    def __init__(self, account_id: str, gateway_url: str, debug: bool = False):
+    def __init__(self, account_id: str, gateway_url: str, debug: bool = False, token: str = ""):
         self.account_id = account_id
         self.gateway_url = gateway_url
+        self.token = token
         self.wechat = WeChatOperator()
         self.ws: Optional[websockets.ClientConnection] = None
         self._running = False
@@ -279,7 +280,10 @@ class UIBridge:
 
     async def _connect_gateway(self) -> bool:
         """连接 WSS Gateway"""
+        # 鉴权: 配置了 API Token 时拼到 URL query (服务器 process_request 握手校验)
         url = f"{self.gateway_url}/ws/hook/{self.account_id}"
+        if self.token:
+            url += f"?token={self.token}"
         try:
             self.ws = await websockets.connect(url, ping_interval=25)
             log("✓", f"已连接网关: {url}")
@@ -387,6 +391,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="无界AI · 微信 UI 桥接器")
     parser.add_argument("--account", "-a", default="sales_01")
     parser.add_argument("--gateway", "-g", default="ws://127.0.0.1:8765")
+    parser.add_argument("--token", default="", help="API Token (服务器启用鉴权后必填)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -396,6 +401,7 @@ if __name__ == "__main__":
 {'=' * 55}
   账号: {args.account}
   网关: {args.gateway}/ws/hook/{args.account}
+  鉴权: {'✅ 已启用 (token 已配置)' if args.token else '⚠️ 未配置 token (服务器启用鉴权后将无法连接)'}
   模式: Win32 + 键盘模拟 (不注入, 不封号)
 {'=' * 55}
 
@@ -419,5 +425,5 @@ if __name__ == "__main__":
         print("请安装依赖: pip install pyautogui pyperclip pywin32")
         sys.exit(1)
 
-    bridge = UIBridge(args.account, args.gateway, args.debug)
+    bridge = UIBridge(args.account, args.gateway, args.debug, token=args.token)
     asyncio.run(bridge.start())
