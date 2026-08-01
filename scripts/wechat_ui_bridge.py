@@ -256,6 +256,22 @@ class WeChatOperator:
         self.current_chat = contact
         return True
 
+    @staticmethod
+    def _is_pseudo_name(name: str) -> bool:
+        """
+        判断是否为伪联系人名 (UI 模式未识别出真实客户)。
+
+        伪名不触发 Ctrl+F 导航 — 直接在用户当前打开的聊天窗口发送,
+        避免把用户切好的窗口搞乱。
+        """
+        if not name:
+            return True
+        if name in ("微信联系人", "未知", "unknown"):
+            return True
+        if name.startswith("wxid_") or name.startswith("wx_"):
+            return True
+        return False
+
     def check_unread(self) -> bool:
         """
         检查是否有未读消息。
@@ -348,10 +364,11 @@ class UIBridge:
                         text = sd.get("text", "")
                         to_user = sd.get("to_user", "")
                         if text:
-                            # 导航到目标聊天 (如果需要)
-                            if to_user and to_user != self.wechat.current_chat:
+                            # 修复: 伪名 (UI 模式未识别真实客户) 不导航!
+                            # 之前 Ctrl+F 搜索"微信联系人"会把用户切好的聊天窗口搞乱
+                            if to_user and to_user != self.wechat.current_chat and not self._is_pseudo_name(to_user):
                                 self.wechat.navigate_to_chat(to_user)
-                            # 发送
+                            # 发送到当前窗口
                             self.wechat.send_reply(text)
                     elif data.get("type") == "ping":
                         await self.ws.send(
