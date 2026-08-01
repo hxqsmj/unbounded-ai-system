@@ -21,14 +21,33 @@ from fastapi import Header, HTTPException, status
 from app.core.config import settings
 
 
+def _normalize_token(s: str) -> str:
+    """
+    规范化用户输入的 token: 去首尾空白 + 全角转半角。
+
+    中文输入法/手机键盘常输出全角字符(ａｄｍｉｎ)或带空格,
+    直接比对必 401 → 登录"Token 无效"。
+    """
+    s = s.strip()
+    result = []
+    for ch in s:
+        code = ord(ch)
+        if code == 0x3000:  # 全角空格
+            result.append(" ")
+        elif 0xFF01 <= code <= 0xFF5E:  # 全角 ASCII 区
+            result.append(chr(code - 0xFEE0))
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
 def _token_matches(provided: str) -> bool:
     """恒定时间比较，防时序攻击"""
     if not settings.api_token:
         return True  # 未配置 token 时放行（仅限开发）
     if not provided:
         return False
-    # 容忍首尾空白 (手机输入法/粘贴易带空格)
-    provided = provided.strip()
+    provided = _normalize_token(provided)
     return hmac.compare_digest(provided.encode(), settings.api_token.encode())
 
 

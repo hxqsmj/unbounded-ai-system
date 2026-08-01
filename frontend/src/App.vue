@@ -14,6 +14,15 @@ const loginOperator = ref(localStorage.getItem('wujie_operator_name') || '')
 const loginError = ref('')
 const loginLoading = ref(false)
 
+// 防浏览器自动填充: 输入框初始 readonly, 聚焦时才解锁
+// (autocomplete=off 对移动端 Chrome 常被无视, readonly 是可靠拦截)
+const tokenReadonly = ref(true)
+const operatorReadonly = ref(true)
+function unlockField(field) {
+  if (field === 'token') tokenReadonly.value = false
+  else operatorReadonly.value = false
+}
+
 function doLogin() {
   if (!loginToken.value.trim()) {
     loginError.value = '请输入 API Token'
@@ -28,7 +37,9 @@ function doLogin() {
       window.location.reload() // 刷新以建立带 token 的 WebSocket
     })
     .catch((e) => {
-      loginError.value = (e.response?.status === 401) ? 'Token 无效，请检查后重试' : '无法连接服务器，请检查网络'
+      loginError.value = (e.response?.status === 401)
+        ? 'Token 无效，请确认使用半角英文输入（不要有空格、不要中文输入法全角）'
+        : '无法连接服务器，请检查网络'
     })
     .finally(() => { loginLoading.value = false })
 }
@@ -248,12 +259,20 @@ import { Search, Moon, Sunny, SwitchButton } from '@element-plus/icons-vue'
             placeholder="操作员名称 (可选)"
             size="large"
             clearable
+            autocomplete="off"
+            name="api-operator-login"
+            :readonly="operatorReadonly"
+            @focus="unlockField('operator')"
           />
           <el-input
             v-model="loginToken"
             placeholder="API Token"
             size="large"
             show-password
+            autocomplete="new-password"
+            name="api-token-login"
+            :readonly="tokenReadonly"
+            @focus="unlockField('token')"
             @keyup.enter="doLogin"
           />
           <el-button
