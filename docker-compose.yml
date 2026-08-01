@@ -9,6 +9,8 @@ services:
     volumes:
       - ./data/qdrant_storage:/qdrant/storage
     restart: always
+    # 1.8G 内存的轻量服务器: 给容器设内存上限防 OOM
+    mem_limit: 512m
 
   # 2. 全链路 Trace 日志数据库 MongoDB
   mongodb:
@@ -19,6 +21,7 @@ services:
     volumes:
       - ./data/mongo_data:/data/db
     restart: always
+    mem_limit: 512m
 
   # 3. RAG 反馈数据飞轮 PostgreSQL
   postgres:
@@ -34,6 +37,7 @@ services:
     volumes:
       - ./data/pg_data:/var/lib/postgresql/data
     restart: always
+    mem_limit: 256m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U geop -d unbounded_ai"]
       interval: 10s
@@ -49,3 +53,4 @@ services:
     volumes:
       - ./data/redis_data:/data
     restart: always
+    mem_limit: 128m
